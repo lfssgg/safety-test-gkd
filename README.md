@@ -1,4 +1,3 @@
-[Uploading README.md…]()
 # UCAS 实安课堂 · DeepSeek 全自动学习助手
 
 > 适用于**中国科学院大学实验室安全育人智慧学习系统**课程页面的 Tampermonkey 用户脚本。通过 DeepSeek API 辅助识别视频随堂习题，并按网站原有的播放、提交与课程切换流程运行。
