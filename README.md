@@ -54,6 +54,8 @@
 ### 安装步骤
 
 0. 如果已经安装 Tampermonkey， 直接在源代码页右上角，点击Raw即可跳转到安装页面。
+<img width="1581" height="597" alt="image" src="https://github.com/user-attachments/assets/1a5257dd-91d5-4394-af73-ca8f85c29e9c" />
+
 
 1. 下载本仓库的 [`UCAS_实安课堂_DeepSeek全自动学习助手_v1.3_UTF8.user.js`](./UCAS_实安课堂_DeepSeek全自动学习助手_v1.3_UTF8.user.js)。如果仓库中使用了其他脚本文件名，请以实际文件为准。
 2. 在 Tampermonkey 中选择「管理面板」→「实用工具」→「导入」，选择上述 `.user.js` 文件并安装。
