@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UCAS 实安课堂 · 题库驱动全自动学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      2.0.0
-// @description  优先匹配 4304 道本地题库；未命中时使用 DeepSeek 深度思考、官方联网搜索与独立复核；自动答题并续刷未完成课程。
+// @version      2.0.1
+// @description  以题干和选项为主匹配 4304 道题库，题目 ID 仅作辅助；未命中时使用 DeepSeek；自动答题并续刷未完成课程。
 // @author       Zyoung&GPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
@@ -22,7 +22,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
@@ -141,7 +141,7 @@
         <details id="settings">
           <summary>设置（题库命中无需 API Key）</summary>
           <label>DeepSeek API Key <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></label>
-          <label><input id="useQuestionBank" type="checkbox">优先使用本地题库（命中后直接作答；未命中再调用 DeepSeek）</label>
+          <label><input id="useQuestionBank" type="checkbox">优先使用本地题库（题干 + 选项匹配；题目 ID 仅辅助）</label>
           <div class="buttons"><button id="refreshBank">检查 / 更新题库</button></div>
           <label>文字题模型（推荐 deepseek-v4-pro）
             <select id="model"><option value="deepseek-v4-pro">deepseek-v4-pro（高准确率）</option><option value="deepseek-flash">deepseek-flash（较省费用）</option></select>
@@ -180,7 +180,7 @@
     const labels = (result.answers || []).join('、') || '未能确定';
     const fromBank = result.source === 'question-bank';
     $('answer').style.display = 'block';
-    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\n${fromBank ? '题库标准答案' : 'AI 建议'}：${labels}\n答案来源：${fromBank ? `本地题库（${result.matchMethod || '匹配成功'}）` : (result.model || 'DeepSeek')}\n题库类别：${fromBank ? (result.category || '未标注') : '未命中，使用 AI'}\n题库 ID：${fromBank ? (result.bankQuestion?.id || question.questionId || '未获取') : (question.questionId || '未获取')}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n联网核实：${fromBank ? '未调用（题库命中）' : (result.webVerified ? '已检索并与首轮一致' : (result.webChecked ? '证据不足/未通过' : '尚未核实/未开启'))}\n网页来源：${(result.sources || []).map(v => v.url).slice(0, 4).join('\n') || '无'}\n独立复核：${fromBank ? '未调用（题库标准答案）' : (result.verified ? '两轮一致' : '未通过/未开启')}`;
+    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\n${fromBank ? '题库标准答案' : 'AI 建议'}：${labels}\n答案来源：${fromBank ? `本地题库（${result.matchMethod || '匹配成功'}）` : (result.model || 'DeepSeek')}\n题库类别：${fromBank ? (result.category || '未标注') : '未命中，使用 AI'}\n页面题目 ID（仅辅助）：${question.questionId || '未获取'}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n联网核实：${fromBank ? '未调用（题库命中）' : (result.webVerified ? '已检索并与首轮一致' : (result.webChecked ? '证据不足/未通过' : '尚未核实/未开启'))}\n网页来源：${(result.sources || []).map(v => v.url).slice(0, 4).join('\n') || '无'}\n独立复核：${fromBank ? '未调用（题库标准答案）' : (result.verified ? '两轮一致' : '未通过/未开启')}`;
   }
   function readPanel() {
     prefs.apiKey = $('apiKey').value.trim();
@@ -222,7 +222,7 @@
       .normalize('NFKC')
       .toLowerCase()
       .replace(/[\s\u200b-\u200f\uFEFF]+/g, '')
-      .replace(/[，。！？、；：,.!?;:（）()\[\]{}"'“”‘’《》<>]/g, '');
+      .replace(/[，。！？、；：,.!?;:（）()\[\]{}"'“”‘’《》]/g, '');
   }
   function parseBankAnswer(raw) {
     const parts = String(raw || '').toUpperCase().split(/[,，、;；\s]+/).filter(Boolean);
@@ -385,93 +385,145 @@
     }
     return null;
   }
-  function bankOptionMap(bankQuestion, question, allowIdFallback) {
+  // 题库匹配以题干为主、选项为二次确认；平台 questionId 只作辅助信息，绝不单独决定答案。
+  function mapBankAnswers(bankQuestion, question, bankAnswers) {
     const letters = ['A', 'B', 'C', 'D'];
     const bankOptions = letters
       .map(letter => ({ letter, text: bankQuestion[`option${letter.toLowerCase()}`] }))
       .filter(option => option.text != null && String(option.text).trim() !== '');
     if (bankOptions.length !== question.choices.length) return null;
 
-    const current = question.choices;
-    const map = {};
-    let allTextMatched = true;
-    const used = new Set();
-    for (const bankOption of bankOptions) {
-      const key = normalizeMatchText(bankOption.text);
-      const matches = current.filter(option => normalizeMatchText(option.text) === key);
-      if (!key || matches.length !== 1 || used.has(matches[0].letter)) {
-        allTextMatched = false;
-        break;
+    const groups = new Map();
+    for (const option of bankOptions) {
+      const key = normalizeMatchText(option.text);
+      if (!key) return null;
+      if (!groups.has(key)) groups.set(key, { bank: [], current: [] });
+      groups.get(key).bank.push(option.letter);
+    }
+    for (const option of question.choices) {
+      const key = normalizeMatchText(option.text);
+      if (!key || !groups.has(key)) return null;
+      groups.get(key).current.push(option.letter);
+    }
+
+    const mappedAnswers = [];
+    for (const group of groups.values()) {
+      if (group.bank.length !== group.current.length) return null;
+      const selected = group.bank.filter(letter => bankAnswers.includes(letter));
+      if (!selected.length) continue;
+      if (selected.length === group.bank.length) {
+        // 同文案选项全部被选中时，映射整组，不受组内顺序影响。
+        mappedAnswers.push(...group.current);
+      } else if (group.bank.length === 1) {
+        mappedAnswers.push(group.current[0]);
+      } else {
+        // 重复文案中只选了部分，无法仅凭文本判断是哪一个页面字母，拒绝猜测。
+        return null;
       }
-      map[bankOption.letter] = matches[0].letter;
-      used.add(matches[0].letter);
     }
-    if (allTextMatched && used.size === current.length) return map;
-
-    // 文本选项保持原位时，允许按字母映射；图片选项只有 ID 精确命中时才允许此回退。
-    const sameLetters = bankOptions.every(option => {
-      const currentOption = current.find(item => item.letter === option.letter);
-      return currentOption && normalizeMatchText(currentOption.text) === normalizeMatchText(option.text);
-    });
-    if (sameLetters) return Object.fromEntries(bankOptions.map(option => [option.letter, option.letter]));
-
-    const imageMode = String(bankQuestion.isPic || '').toUpperCase() === 'Y' ||
-      current.some(option => option.imageUrl) ||
-      bankOptions.some(option => /\.(png|jpe?g|gif|webp)(?:$|[?#])/i.test(String(option.text)));
-    if (allowIdFallback && imageMode && current.length === bankOptions.length) {
-      return Object.fromEntries(bankOptions.map(option => [option.letter, option.letter]));
-    }
-    return null;
+    return mappedAnswers.sort();
   }
+
+  function stemSimilarity(a, b) {
+    if (a === b) return 1;
+    const maxLen = Math.max(a.length, b.length);
+    if (Math.min(a.length, b.length) < 12 || Math.abs(a.length - b.length) > Math.max(2, Math.floor(maxLen * 0.04))) return 0;
+    // 两行 Levenshtein，题库仅约 4.3k 条；只在没有精确题干时执行。
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    let curr = new Array(b.length + 1);
+    for (let i = 1; i <= a.length; i++) {
+      curr[0] = i;
+      let rowMin = curr[0];
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+        if (curr[j] < rowMin) rowMin = curr[j];
+      }
+      if (rowMin > Math.max(2, Math.floor(maxLen * 0.04))) return 0;
+      [prev, curr] = [curr, prev];
+    }
+    return 1 - prev[b.length] / maxLen;
+  }
+
   function findQuestionBankAnswer(question) {
     if (!questionBankIndex) return { matched: false, reason: '题库尚未加载' };
-    let candidates = [];
-    let matchMethod = '题干 + 选项';
-    let exactId = false;
-    if (question.questionId) {
-      const byId = questionBankIndex.byId.get(String(question.questionId));
-      if (byId) {
-        candidates = [byId];
-        matchMethod = '题目 ID';
-        exactId = true;
+    const stemKey = normalizeMatchText(question.stem);
+    if (!stemKey) return { matched: false, reason: '当前题干为空，无法匹配' };
+
+    // 第一优先级：规范化后的题干完全一致。
+    let candidates = questionBankIndex.byStem.get(stemKey) || [];
+    let matchMethod = '题干精确匹配 + 选项核对';
+    let similarity = 1;
+
+    // 第二优先级：题干存在少量格式/录入差异时，进行严格近似匹配。
+    // 近似匹配必须同时通过全部选项文本核对，否则不会自动采用。
+    if (!candidates.length) {
+      const near = [];
+      let best = 0;
+      for (const [bankStem, records] of questionBankIndex.byStem.entries()) {
+        const score = stemSimilarity(stemKey, bankStem);
+        if (score >= 0.96) {
+          if (score > best) best = score;
+          near.push({ records, score });
+        }
+      }
+      if (near.length) {
+        candidates = near.filter(item => item.score >= best - 0.005).flatMap(item => item.records);
+        similarity = best;
+        matchMethod = `题干近似匹配 ${(best * 100).toFixed(1)}% + 选项核对`;
       }
     }
     if (!candidates.length) {
-      candidates = questionBankIndex.byStem.get(normalizeMatchText(question.stem)) || [];
+      const idRecord = question.questionId ? questionBankIndex.byId.get(String(question.questionId)) : null;
+      const idHint = idRecord ? '；虽然 ID 存在记录，但题干不一致，已忽略该 ID' : '';
+      return { matched: false, reason: `题库没有相同或足够接近的题干${idHint}` };
     }
+
     const matches = [];
     for (const bankQuestion of candidates) {
-      if (normalizeMatchText(bankQuestion.stem) !== normalizeMatchText(question.stem)) continue;
+      if (normalizeMatchText(bankQuestion.stem) === '' ||
+          (similarity === 1 && normalizeMatchText(bankQuestion.stem) !== stemKey)) continue;
       const bankAnswers = parseBankAnswer(bankQuestion.correctAnswer);
       if (!bankAnswers) continue;
-      const bankMultiple = String(bankQuestion.kind) === '3';
+
+      // 以题库答案数量辅助纠正少量 kind 字段异常；最终仍必须与网页真实控件类型一致。
+      const bankMultiple = String(bankQuestion.kind) === '3' || bankAnswers.length > 1;
       if (bankMultiple !== Boolean(question.multiple)) continue;
       if (!question.multiple && bankAnswers.length !== 1) continue;
-      const optionMap = bankOptionMap(bankQuestion, question, exactId);
-      if (!optionMap) continue;
-      const answers = bankAnswers.map(letter => optionMap[letter]).filter(Boolean).sort();
-      if (!answers.length || answers.length !== bankAnswers.length) continue;
+
+      const answers = mapBankAnswers(bankQuestion, question, bankAnswers);
+      if (!answers || !answers.length) continue;
       matches.push({
         answers,
         category: bankQuestion.categoryName || bankQuestion.type_dictText || '未分类',
         bankQuestion,
-        matchMethod
+        matchMethod,
+        similarity
       });
     }
+
     if (!matches.length) {
-      return { matched: false, reason: exactId ? 'ID 命中，但题干 / 选项 / 题型校验未通过' : '未找到题干与选项完全匹配的记录' };
+      return { matched: false, reason: '题干已匹配，但题型或选项内容不一致，拒绝套用答案' };
     }
-    const signatures = new Set(matches.map(item => item.answers.join(',')));
-    if (signatures.size !== 1) return { matched: false, reason: '同题干候选答案存在冲突，拒绝自动匹配' };
-    if (matches.length > 1 && !exactId) {
-      const uniqueRecords = new Set(matches.map(item => [
-        normalizeMatchText(item.bankQuestion.stem),
-        ...['a','b','c','d'].map(k => normalizeMatchText(item.bankQuestion[`option${k}`])),
-        item.bankQuestion.correctAnswer
-      ].join('|')));
-      if (uniqueRecords.size > 1) return { matched: false, reason: '题库存在重复题目且无法唯一定位' };
+
+    // 同一题干可能在多个类别/记录中重复；只有所有通过选项核对的记录映射到同一答案时才接受。
+    const answerSignatures = new Set(matches.map(item => item.answers.join(',')));
+    if (answerSignatures.size !== 1) {
+      return { matched: false, reason: '相同题干和选项对应到不同答案，存在题库冲突，拒绝自动匹配' };
     }
-    return { matched: true, ...matches[0] };
+
+    // ID 仅用于在已经通过题干+选项验证的候选中优先显示对应记录，不参与建立匹配。
+    const idMatched = question.questionId
+      ? matches.find(item => String(item.bankQuestion.id) === String(question.questionId))
+      : null;
+    const chosen = idMatched || matches[0];
+    return {
+      matched: true,
+      ...chosen,
+      matchMethod: `${chosen.matchMethod}${idMatched ? '（ID 辅助确认）' : '（ID 不参与判定）'}`,
+      candidateCount: candidates.length,
+      verifiedCandidateCount: matches.length
+    };
   }
 
   // 根据实际 HTML：右侧 .right .title、HTML5 video、左侧 ant-tree 目录。
@@ -1186,7 +1238,7 @@
           };
           lastResult = { q, answer };
           showAnswer(q, answer);
-          log(`题库命中：${answer.answers.join('、')}；类别 ${answer.category}；方式 ${answer.matchMethod}`);
+          log(`题库命中：${answer.answers.join('、')}；类别 ${answer.category}；方式 ${answer.matchMethod}；候选 ${bankResult.candidateCount} 条，选项核对通过 ${bankResult.verifiedCandidateCount} 条`);
           let applied = false;
           if (running && prefs.autoApply) {
             applied = await applyAnswers(q, answer.answers);
@@ -1353,7 +1405,7 @@
     questionBankStatus = '已关闭';
     renderQuestionBankStatus();
   }
-  log(`脚本 ${VERSION} 就绪：优先使用本地题库，未命中时回退 DeepSeek；保留视频结束刷新定位`);
+  log(`脚本 ${VERSION} 就绪：题干优先 + 选项核对，题目 ID 仅作辅助；未命中时回退 DeepSeek`);
   if (document.getElementById('ucas-study-helper')) log('发现另一个实安课堂助手，请避免同时开启两个自动学习脚本');
   setStatus(running ? '全自动运行中' : '待机：可用题库自动答题；未命中题目需配置 API Key');
   attachVideo();
