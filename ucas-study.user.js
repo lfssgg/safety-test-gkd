@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         UCAS 实安课堂 · DeepSeek 学习助手
+// @name         UCAS 实安课堂 · 题库驱动全自动学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      1.6.0
-// @description  视频题 DeepSeek 深度思考＋官方联网搜索核实＋可选独立复核；证据不足停止自动提交，视频结束刷新定位未完成课程。
-// @author       ChatGPT
+// @version      2.0.0
+// @description  优先匹配 4304 道本地题库；未命中时使用 DeepSeek 深度思考、官方联网搜索与独立复核；自动答题并续刷未完成课程。
+// @author       Zyoung&GPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
 // @updateURL    https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js
@@ -13,6 +13,7 @@
 // @match        http://ucas.jcedutec.cn/*
 // @match        https://ucas.jcedutec.cn/*
 // @connect      api.deepseek.com
+// @connect      raw.githubusercontent.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -21,15 +22,21 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.6.0';
+  const VERSION = '2.0.0';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
+  const QUESTION_BANK_URL = 'https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas_all_20_categories_4304_raw.json';
+  const QUESTION_BANK_CACHE_KEY = 'ucas-ds-question-bank-cache-v2';
+  const QUESTION_BANK_CHECK_KEY = 'ucas-ds-question-bank-last-check-v2';
+  const QUESTION_BANK_UPDATED_KEY = 'ucas-ds-question-bank-last-update-v2';
+  const QUESTION_BANK_REFRESH_INTERVAL = 24 * 60 * 60 * 1000;
   if (document.getElementById(ID)) return;
 
   const defaults = {
     apiKey: '', model: 'deepseek-v4-pro', speed: 1.5,
     reasoningEffort: 'high', doubleCheck: true, webVerify: true, reference: '',
+    useQuestionBank: true,
     autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true,
     autoLocate: true, refreshAfterEnd: true
   };
@@ -53,7 +60,7 @@
     GM_setValue('ucas-ds-migrated-v15', true);
   }
   function savePreferencesEarly() { GM_setValue('ucas-ds-options-v1', prefs); }
-  let running = sessionStorage.getItem(RUN_KEY) === '1' || (prefs.autoStart && Boolean(prefs.apiKey));
+  let running = sessionStorage.getItem(RUN_KEY) === '1' || (prefs.autoStart && (Boolean(prefs.apiKey) || prefs.useQuestionBank !== false));
   let boundVideo = null;
   let boundSrc = null;
   const seenVideos = new WeakSet();
@@ -67,6 +74,11 @@
   let lastResult = null;
   const processed = new Set();
   const notes = [];
+  const vueQuestionCache = new WeakMap();
+  let questionBankIndex = null;
+  let questionBankLoading = null;
+  let questionBankStatus = '尚未加载';
+  let questionBankUpdatedAt = Number(GM_getValue(QUESTION_BANK_UPDATED_KEY, 0)) || 0;
 
   function save() { GM_setValue('ucas-ds-options-v1', prefs); }
   function clean(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
@@ -120,14 +132,17 @@
         <p id="state">状态：待机</p>
         <p id="course" class="muted">等待检测课程...</p>
         <p id="progress" class="muted"></p>
+        <p id="bankStatus" class="muted">题库：正在初始化...</p>
         <p id="answer"></p>
         <div class="buttons">
           <button id="start">开始全自动学习</button><button id="stop">暂停</button>
           <button id="solve">识别并解题</button><button id="next">下一课程</button>
         </div>
         <details id="settings">
-          <summary>设置（首次使用请填写 API Key）</summary>
+          <summary>设置（题库命中无需 API Key）</summary>
           <label>DeepSeek API Key <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></label>
+          <label><input id="useQuestionBank" type="checkbox">优先使用本地题库（命中后直接作答；未命中再调用 DeepSeek）</label>
+          <div class="buttons"><button id="refreshBank">检查 / 更新题库</button></div>
           <label>文字题模型（推荐 deepseek-v4-pro）
             <select id="model"><option value="deepseek-v4-pro">deepseek-v4-pro（高准确率）</option><option value="deepseek-flash">deepseek-flash（较省费用）</option></select>
           </label>
@@ -163,8 +178,9 @@
   }
   function showAnswer(question, result) {
     const labels = (result.answers || []).join('、') || '未能确定';
+    const fromBank = result.source === 'question-bank';
     $('answer').style.display = 'block';
-    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\nAI 建议：${labels}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n联网核实：${result.webVerified ? '已检索并与首轮一致' : (result.webChecked ? '证据不足/未通过' : '尚未核实/未开启')}\n网页来源：${(result.sources || []).map(v => v.url).slice(0, 4).join('\n') || '无'}\n独立复核：${result.verified ? '两轮一致' : '未通过/未开启'}`;
+    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\n${fromBank ? '题库标准答案' : 'AI 建议'}：${labels}\n答案来源：${fromBank ? `本地题库（${result.matchMethod || '匹配成功'}）` : (result.model || 'DeepSeek')}\n题库类别：${fromBank ? (result.category || '未标注') : '未命中，使用 AI'}\n题库 ID：${fromBank ? (result.bankQuestion?.id || question.questionId || '未获取') : (question.questionId || '未获取')}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n联网核实：${fromBank ? '未调用（题库命中）' : (result.webVerified ? '已检索并与首轮一致' : (result.webChecked ? '证据不足/未通过' : '尚未核实/未开启'))}\n网页来源：${(result.sources || []).map(v => v.url).slice(0, 4).join('\n') || '无'}\n独立复核：${fromBank ? '未调用（题库标准答案）' : (result.verified ? '两轮一致' : '未通过/未开启')}`;
   }
   function readPanel() {
     prefs.apiKey = $('apiKey').value.trim();
@@ -173,6 +189,11 @@
     prefs.doubleCheck = $('doubleCheck').checked;
     prefs.webVerify = $('webVerify').checked;
     prefs.reference = $('reference').value.slice(0, 4500);
+    prefs.useQuestionBank = $('useQuestionBank').checked;
+    if (prefs.useQuestionBank && !questionBankIndex) {
+      restoreQuestionBankCache();
+      refreshQuestionBank(false);
+    }
     prefs.speed = Number($('speed').value) || 1;
     prefs.autoNext = $('autoNext').checked;
     prefs.autoAI = $('autoAI').checked;
@@ -191,8 +212,266 @@
     $('doubleCheck').checked = prefs.doubleCheck !== false;
     $('webVerify').checked = prefs.webVerify !== false;
     $('reference').value = prefs.reference || '';
+    $('useQuestionBank').checked = prefs.useQuestionBank !== false;
     $('speed').value = String(prefs.speed);
     for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart', 'autoLocate', 'refreshAfterEnd']) $(key).checked = prefs[key];
+  }
+
+  function normalizeMatchText(value) {
+    return String(value == null ? '' : value)
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[\s\u200b-\u200f\uFEFF]+/g, '')
+      .replace(/[，。！？、；：,.!?;:（）()\[\]{}"'“”‘’《》<>]/g, '');
+  }
+  function parseBankAnswer(raw) {
+    const parts = String(raw || '').toUpperCase().split(/[,，、;；\s]+/).filter(Boolean);
+    if (!parts.length || parts.some(value => !/^[A-D]$/.test(value))) return null;
+    return [...new Set(parts)].sort();
+  }
+  function buildQuestionBankIndex(raw) {
+    if (!raw || !Array.isArray(raw.categories)) throw new Error('题库格式不正确：缺少 categories 数组');
+    const byId = new Map();
+    const byStem = new Map();
+    let count = 0;
+    for (const category of raw.categories) {
+      if (!Array.isArray(category.questions)) continue;
+      for (const item of category.questions) {
+        if (!item || !item.id || !item.stem || !item.correctAnswer) continue;
+        const q = { ...item, categoryName: category.name || item.type_dictText || '未分类' };
+        const id = String(q.id);
+        if (!byId.has(id)) byId.set(id, q);
+        const stemKey = normalizeMatchText(q.stem);
+        if (!byStem.has(stemKey)) byStem.set(stemKey, []);
+        byStem.get(stemKey).push(q);
+        count++;
+      }
+    }
+    if (count < 100) throw new Error(`题库有效题目数量异常：${count}`);
+    return { byId, byStem, count, categoryCount: raw.categories.length, total: Number(raw.total) || count };
+  }
+  function restoreQuestionBankCache() {
+    try {
+      const cached = GM_getValue(QUESTION_BANK_CACHE_KEY, null);
+      if (!cached) return false;
+      questionBankIndex = buildQuestionBankIndex(cached);
+      questionBankStatus = `本地缓存 ${questionBankIndex.count} 题 / ${questionBankIndex.categoryCount} 类`;
+      questionBankUpdatedAt = Number(GM_getValue(QUESTION_BANK_UPDATED_KEY, 0)) || 0;
+      return true;
+    } catch (error) {
+      questionBankIndex = null;
+      questionBankStatus = `缓存不可用：${error.message || error}`;
+      return false;
+    }
+  }
+  function renderQuestionBankStatus() {
+    const el = $('bankStatus');
+    if (el) {
+      const updated = questionBankUpdatedAt
+        ? ` · 更新于 ${new Date(questionBankUpdatedAt).toLocaleString('zh-CN', { hour12: false })}`
+        : '';
+      el.textContent = `题库：${questionBankStatus}${updated}`;
+    }
+  }
+  function refreshQuestionBank(force = false) {
+    if (questionBankLoading) return questionBankLoading;
+    const lastCheck = Number(GM_getValue(QUESTION_BANK_CHECK_KEY, 0)) || 0;
+    if (!force && questionBankIndex && Date.now() - lastCheck < QUESTION_BANK_REFRESH_INTERVAL) {
+      renderQuestionBankStatus();
+      return Promise.resolve(true);
+    }
+    questionBankStatus = questionBankIndex ? '本地缓存可用，正在检查 GitHub 更新...' : '正在从 GitHub 下载题库...';
+    renderQuestionBankStatus();
+    questionBankLoading = new Promise(resolve => {
+      let settled = false;
+      const finish = (ok, message) => {
+        if (settled) return;
+        settled = true;
+        questionBankLoading = null;
+        questionBankStatus = message;
+        renderQuestionBankStatus();
+        resolve(ok);
+      };
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: QUESTION_BANK_URL,
+          timeout: 60000,
+          headers: { 'Accept': 'application/json' },
+          onload: response => {
+            try {
+              if (response.status < 200 || response.status >= 300) {
+                throw new Error(`HTTP ${response.status}`);
+              }
+              const raw = JSON.parse(response.responseText || '{}');
+              const index = buildQuestionBankIndex(raw);
+              questionBankIndex = index;
+              questionBankUpdatedAt = Date.now();
+              try {
+                GM_setValue(QUESTION_BANK_CACHE_KEY, raw);
+                GM_setValue(QUESTION_BANK_UPDATED_KEY, questionBankUpdatedAt);
+              } catch (cacheError) {
+                log(`题库已载入，但本地缓存保存失败：${cacheError.message || cacheError}`);
+              }
+              GM_setValue(QUESTION_BANK_CHECK_KEY, Date.now());
+              processed.clear();
+              finish(true, `GitHub 在线题库 ${index.count} 题 / ${index.categoryCount} 类`);
+              log(`题库更新成功：${index.count} 道题，${index.categoryCount} 个类别`);
+            } catch (error) {
+              GM_setValue(QUESTION_BANK_CHECK_KEY, Date.now());
+              finish(false, questionBankIndex
+                ? `在线更新失败，继续使用本地缓存（${questionBankIndex.count} 题）`
+                : `题库加载失败：${error.message || error}`);
+              log(`题库更新失败：${error.message || error}`);
+            }
+          },
+          onerror: () => {
+            GM_setValue(QUESTION_BANK_CHECK_KEY, Date.now());
+            finish(false, questionBankIndex
+              ? `网络不可用，使用本地缓存（${questionBankIndex.count} 题）`
+              : '题库下载失败：网络或 GitHub Raw 不可用');
+            log('题库下载失败：网络或 GitHub Raw 不可用');
+          },
+          ontimeout: () => {
+            GM_setValue(QUESTION_BANK_CHECK_KEY, Date.now());
+            finish(false, questionBankIndex
+              ? `下载超时，使用本地缓存（${questionBankIndex.count} 题）`
+              : '题库下载超时：暂时没有可用缓存');
+            log('题库下载超时');
+          }
+        });
+      } catch (error) {
+        GM_setValue(QUESTION_BANK_CHECK_KEY, Date.now());
+        finish(false, questionBankIndex
+          ? `更新异常，使用本地缓存（${questionBankIndex.count} 题）`
+          : `题库初始化失败：${error.message || error}`);
+      }
+    });
+    return questionBankLoading;
+  }
+  function findVueQuestionState(modal, stem) {
+    const wantedStem = normalizeMatchText(stem);
+    const cached = vueQuestionCache.get(modal);
+    if (cached?.stemKey === wantedStem && cached.vm) {
+      const data = cached.vm.$data || cached.vm._data || {};
+      const model = cached.vm.model || data.model;
+      const questionId = cached.vm.questionId || data.questionId || model?.questionId || '';
+      if (questionId && model?.stem && normalizeMatchText(model.stem) === wantedStem) {
+        return { questionId: String(questionId), model };
+      }
+    }
+    const roots = [];
+    for (let el = modal; el; el = el.parentElement) {
+      if (el.__vue__) roots.push(el.__vue__);
+    }
+    const appRoot = document.querySelector('#app') || document.body;
+    if (appRoot?.__vue__) roots.push(appRoot.__vue__);
+    const seen = new Set();
+    const queue = roots.slice();
+    let visited = 0;
+    while (queue.length && visited < 1800) {
+      const vm = queue.shift();
+      if (!vm || seen.has(vm)) continue;
+      seen.add(vm);
+      visited++;
+      const data = vm.$data || vm._data || {};
+      const model = vm.model || data.model;
+      const questionId = vm.questionId || data.questionId || model?.questionId || '';
+      if (questionId && model?.stem && normalizeMatchText(model.stem) === wantedStem) {
+        vueQuestionCache.set(modal, { stemKey: wantedStem, vm });
+        return { questionId: String(questionId), model };
+      }
+      if (Array.isArray(vm.$children)) queue.push(...vm.$children);
+    }
+    return null;
+  }
+  function bankOptionMap(bankQuestion, question, allowIdFallback) {
+    const letters = ['A', 'B', 'C', 'D'];
+    const bankOptions = letters
+      .map(letter => ({ letter, text: bankQuestion[`option${letter.toLowerCase()}`] }))
+      .filter(option => option.text != null && String(option.text).trim() !== '');
+    if (bankOptions.length !== question.choices.length) return null;
+
+    const current = question.choices;
+    const map = {};
+    let allTextMatched = true;
+    const used = new Set();
+    for (const bankOption of bankOptions) {
+      const key = normalizeMatchText(bankOption.text);
+      const matches = current.filter(option => normalizeMatchText(option.text) === key);
+      if (!key || matches.length !== 1 || used.has(matches[0].letter)) {
+        allTextMatched = false;
+        break;
+      }
+      map[bankOption.letter] = matches[0].letter;
+      used.add(matches[0].letter);
+    }
+    if (allTextMatched && used.size === current.length) return map;
+
+    // 文本选项保持原位时，允许按字母映射；图片选项只有 ID 精确命中时才允许此回退。
+    const sameLetters = bankOptions.every(option => {
+      const currentOption = current.find(item => item.letter === option.letter);
+      return currentOption && normalizeMatchText(currentOption.text) === normalizeMatchText(option.text);
+    });
+    if (sameLetters) return Object.fromEntries(bankOptions.map(option => [option.letter, option.letter]));
+
+    const imageMode = String(bankQuestion.isPic || '').toUpperCase() === 'Y' ||
+      current.some(option => option.imageUrl) ||
+      bankOptions.some(option => /\.(png|jpe?g|gif|webp)(?:$|[?#])/i.test(String(option.text)));
+    if (allowIdFallback && imageMode && current.length === bankOptions.length) {
+      return Object.fromEntries(bankOptions.map(option => [option.letter, option.letter]));
+    }
+    return null;
+  }
+  function findQuestionBankAnswer(question) {
+    if (!questionBankIndex) return { matched: false, reason: '题库尚未加载' };
+    let candidates = [];
+    let matchMethod = '题干 + 选项';
+    let exactId = false;
+    if (question.questionId) {
+      const byId = questionBankIndex.byId.get(String(question.questionId));
+      if (byId) {
+        candidates = [byId];
+        matchMethod = '题目 ID';
+        exactId = true;
+      }
+    }
+    if (!candidates.length) {
+      candidates = questionBankIndex.byStem.get(normalizeMatchText(question.stem)) || [];
+    }
+    const matches = [];
+    for (const bankQuestion of candidates) {
+      if (normalizeMatchText(bankQuestion.stem) !== normalizeMatchText(question.stem)) continue;
+      const bankAnswers = parseBankAnswer(bankQuestion.correctAnswer);
+      if (!bankAnswers) continue;
+      const bankMultiple = String(bankQuestion.kind) === '3';
+      if (bankMultiple !== Boolean(question.multiple)) continue;
+      if (!question.multiple && bankAnswers.length !== 1) continue;
+      const optionMap = bankOptionMap(bankQuestion, question, exactId);
+      if (!optionMap) continue;
+      const answers = bankAnswers.map(letter => optionMap[letter]).filter(Boolean).sort();
+      if (!answers.length || answers.length !== bankAnswers.length) continue;
+      matches.push({
+        answers,
+        category: bankQuestion.categoryName || bankQuestion.type_dictText || '未分类',
+        bankQuestion,
+        matchMethod
+      });
+    }
+    if (!matches.length) {
+      return { matched: false, reason: exactId ? 'ID 命中，但题干 / 选项 / 题型校验未通过' : '未找到题干与选项完全匹配的记录' };
+    }
+    const signatures = new Set(matches.map(item => item.answers.join(',')));
+    if (signatures.size !== 1) return { matched: false, reason: '同题干候选答案存在冲突，拒绝自动匹配' };
+    if (matches.length > 1 && !exactId) {
+      const uniqueRecords = new Set(matches.map(item => [
+        normalizeMatchText(item.bankQuestion.stem),
+        ...['a','b','c','d'].map(k => normalizeMatchText(item.bankQuestion[`option${k}`])),
+        item.bankQuestion.correctAnswer
+      ].join('|')));
+      if (uniqueRecords.size > 1) return { matched: false, reason: '题库存在重复题目且无法唯一定位' };
+    }
+    return { matched: true, ...matches[0] };
   }
 
   // 根据实际 HTML：右侧 .right .title、HTML5 video、左侧 ant-tree 目录。
@@ -539,9 +818,11 @@
     }
     if (choices.length < 2 || new Set(choices.map(o => o.letter)).size !== choices.length) return [];
     const multiple = choices.some(o => o.input.type === 'checkbox') || /多选/.test(typeName);
-    const signature = [courseTitle(), typeName, stem,
+    const vueState = findVueQuestionState(modal, stem);
+    const questionId = vueState?.questionId || '';
+    const signature = [questionId, courseTitle(), typeName, stem,
       ...choices.map(o => `${o.letter}.${o.text}${o.imageUrl ? '@' + o.imageUrl : ''}`)].join('\n');
-    return [{ stem, typeName, choices, multiple, signature, container: modal,
+    return [{ questionId, stem, typeName, choices, multiple, signature, container: modal,
       group: modal.querySelector('.can-scroll') || modal }];
   }
   function hasChoice(el) {
@@ -881,12 +1162,51 @@
       if (force) log('当前未检测到可识别的视频习题，请先打开视频习题弹窗');
       return;
     }
-    if (!prefs.apiKey) { log('未配置 API Key，无法请求 DeepSeek'); setStatus('需配置 API Key'); return; }
     processed.add(q.signature);
     thinking = true;
-    setStatus('DeepSeek 正在分析题目...');
-    log(`发现题目：${q.stem.slice(0, 58)}${q.stem.length > 58 ? '...' : ''}`);
+    setStatus('正在匹配题库...');
+    log(`发现题目：${q.stem.slice(0, 58)}${q.stem.length > 58 ? '...' : ''}${q.questionId ? `（ID ${q.questionId}）` : ''}`);
     try {
+      if (prefs.useQuestionBank !== false) {
+        if (!questionBankIndex && questionBankLoading) {
+          setStatus('等待题库加载...');
+          await questionBankLoading;
+        }
+        const bankResult = findQuestionBankAnswer(q);
+        if (bankResult.matched) {
+          const answer = {
+            answers: bankResult.answers,
+            explanation: `命中本地题库，按 correctAnswer 字段直接匹配；匹配方式：${bankResult.matchMethod}。`,
+            confidence: '题库标准答案',
+            model: '本地题库',
+            source: 'question-bank',
+            matchMethod: bankResult.matchMethod,
+            category: bankResult.category,
+            bankQuestion: bankResult.bankQuestion
+          };
+          lastResult = { q, answer };
+          showAnswer(q, answer);
+          log(`题库命中：${answer.answers.join('、')}；类别 ${answer.category}；方式 ${answer.matchMethod}`);
+          let applied = false;
+          if (running && prefs.autoApply) {
+            applied = await applyAnswers(q, answer.answers);
+            if (applied) await maybeSubmit(q, answer.answers);
+          }
+          setStatus(!running ? '已匹配题库答案' :
+            (!prefs.autoApply ? '题库已匹配，自动勾选已关闭' :
+              (applied ? '题库已匹配并完成勾选' : '题库命中，但选项未能确认')));
+          return;
+        }
+        log(`题库未命中：${bankResult.reason || '无匹配记录'}；准备使用 DeepSeek`);
+      }
+      if (!prefs.apiKey) {
+        processed.delete(q.signature);
+        retryAfter.set(q.signature, Date.now() + 45000);
+        log('题库未命中且未配置 DeepSeek API Key；本题暂时无法自动解答');
+        setStatus('题库未命中，需配置 API Key');
+        return;
+      }
+      setStatus('DeepSeek 正在分析题目...');
       const answer = await askDeepSeek(q);
       lastResult = { q, answer };
       showAnswer(q, answer);
@@ -993,10 +1313,24 @@
   $('start').addEventListener('click', start);
   $('stop').addEventListener('click', stop);
   $('solve').addEventListener('click', () => { readPanel(); solveOne(true); });
+  $('refreshBank').addEventListener('click', async () => {
+    readPanel();
+    const button = $('refreshBank');
+    button.disabled = true;
+    button.textContent = '正在更新...';
+    const ok = await refreshQuestionBank(true);
+    button.disabled = false;
+    button.textContent = '检查 / 更新题库';
+    if (ok) {
+      processed.clear();
+      log('题库已刷新；当前弹窗如尚未处理，将重新尝试匹配');
+      if (running) solveOne(false);
+    }
+  });
   $('next').addEventListener('click', () => { readPanel(); goNext(true); });
   $('save').addEventListener('click', () => {
     readPanel(); log('设置已保存');
-    if (!running && prefs.autoStart && prefs.apiKey) start();
+    if (!running && prefs.autoStart && (prefs.apiKey || prefs.useQuestionBank)) start();
   });
   $('fold').addEventListener('click', () => {
     $('body').hidden = !$('body').hidden;
@@ -1011,9 +1345,17 @@
   });
 
   populatePanel();
-  log(`脚本 ${VERSION} 就绪：已加入 DeepSeek 官方联网核实；视频完成后继续刷新定位`);
+  if (prefs.useQuestionBank !== false) {
+    restoreQuestionBankCache();
+    renderQuestionBankStatus();
+    refreshQuestionBank(false);
+  } else {
+    questionBankStatus = '已关闭';
+    renderQuestionBankStatus();
+  }
+  log(`脚本 ${VERSION} 就绪：优先使用本地题库，未命中时回退 DeepSeek；保留视频结束刷新定位`);
   if (document.getElementById('ucas-study-helper')) log('发现另一个实安课堂助手，请避免同时开启两个自动学习脚本');
-  setStatus(running ? '全自动运行中' : '待机：填写 API Key 后保存并开始');
+  setStatus(running ? '全自动运行中' : '待机：可用题库自动答题；未命中题目需配置 API Key');
   attachVideo();
   updateProgress();
   if (running) {
