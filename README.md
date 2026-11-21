@@ -59,14 +59,20 @@
 - 能正常访问学校的实验室安全育人智慧学习系统。
 - 已开通 DeepSeek API，并持有可用的 API Key；API 调用可能产生费用。
 
-### 安装步骤
+### 安装步骤（推荐：GitHub Raw 一键安装）
 
-1. 推荐直接打开 **[安装最新版油猴脚本](https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js)**，让 Tampermonkey 识别并安装；如果浏览器仅下载文件，也可下载 [`ucas-study.user.js`](./ucas-study.user.js) 后通过 Tampermonkey 的「实用工具」→「导入」安装。
-2. 在 Tampermonkey 中选择「管理面板」→「实用工具」→「导入」，选择上述 `.user.js` 文件并安装。
-3. **禁用旧版 v1.1 / v1.2 或其他同类脚本**，避免多个自动学习助手同时操作网页。
-4. 登录课程网站并打开课程详情页，右下角应显示「实安课堂 · DeepSeek 助手 v1.4.0」。
-5. 展开「设置」，填写自己的 **DeepSeek API Key**，按需调整模型、倍速及自动化选项，点击「保存设置」。
-6. 首次配置后可点击「开始全自动学习」；开启自动恢复且已配置 Key 时，刷新页面也会尝试自动运行。
+无需下载 ZIP 或手动复制代码，直接从 GitHub 安装：
+
+1. 先在浏览器中安装并启用 [Tampermonkey](https://www.tampermonkey.net/)。
+2. 点击进入仓库的 **[ucas-study.user.js 代码页面](https://github.com/lfssgg/safety-test-gkd/blob/main/ucas-study.user.js)**。
+3. 在代码页面**右上方点击 `Raw`**，打开脚本原始内容。
+4. Tampermonkey 通常会自动弹出「安装用户脚本」页面，检查脚本名称及来源后点击**「安装」**即可。
+5. 返回 Tampermonkey 管理面板确认脚本已启用，**禁用以前安装的 v1.1 / v1.2 / v1.3 或其他同类脚本**，避免重复运行。
+6. 登录课程网站并打开课程详情页，在助手「设置」中填写自己的 **DeepSeek API Key** 并保存；首次配置后可点击「开始全自动学习」。开启自动恢复后，刷新页面也会尝试自动运行。
+
+**快捷入口：** [点击直接打开 Raw 安装地址](https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js)。
+
+**如果点击 Raw 后只显示代码或下载文件，没有出现安装页面：** 请先确认 Tampermonkey 已安装并启用；然后下载 [`ucas-study.user.js`](./ucas-study.user.js)，在 Tampermonkey「管理面板」→「实用工具」→「导入」中选择该文件进行安装。不同浏览器或 Tampermonkey 版本的按钮名称可能略有不同。
 
 > 如果浏览器阻止自动播放，需要先在网页中手动点击一次视频播放键。
 
