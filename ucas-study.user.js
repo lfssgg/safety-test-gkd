@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UCAS 实安课堂 · DeepSeek 学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      1.4.0
-// @description  视频习题出现时自动调用 DeepSeek、勾选并提交，提交后继续播放，播放结束自动刷新课程进度，定位首个未完成视频；不伪造学习进度。
+// @version      1.5.0
+// @description  视频题自动调用 DeepSeek 深度思考并二次复核，确认后勾选提交；视频结束刷新并定位未完成课程。不保证答案正确。
 // @author       ChatGPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
@@ -21,18 +21,19 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
   if (document.getElementById(ID)) return;
 
   const defaults = {
-    apiKey: '', model: 'deepseek-flash', speed: 1.5,
+    apiKey: '', model: 'deepseek-v4-pro', speed: 1.5,
+    reasoningEffort: 'high', doubleCheck: true, reference: '',
     autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true,
     autoLocate: true, refreshAfterEnd: true
   };
-  // 迁移 v1.1 设置：沿用 API Key/倍速，首次升级时开启用户要求的完整自动模式。
+  // 沿用 v1.4 的 API Key、倍速等配置；质量模式的升级迁移独立处理。
   const saved = GM_getValue('ucas-ds-options-v1', {}) || {};
   let prefs = { ...defaults, ...saved };
   if (!GM_getValue('ucas-ds-migrated-v12', false)) {
@@ -44,6 +45,14 @@
     GM_setValue('ucas-ds-options-v1', prefs);
     GM_setValue('ucas-ds-migrated-v12', true);
   }
+  if (!GM_getValue('ucas-ds-migrated-v15', false)) {
+    if (!saved.model || saved.model === 'deepseek-flash') prefs.model = 'deepseek-v4-pro';
+    prefs.reasoningEffort = 'high';
+    prefs.doubleCheck = true;
+    savePreferencesEarly();
+    GM_setValue('ucas-ds-migrated-v15', true);
+  }
+  function savePreferencesEarly() { GM_setValue('ucas-ds-options-v1', prefs); }
   let running = sessionStorage.getItem(RUN_KEY) === '1' || (prefs.autoStart && Boolean(prefs.apiKey));
   let boundVideo = null;
   let boundSrc = null;
@@ -94,7 +103,7 @@
       #stop { background:#fff6f2; color:#b94b25; border-color:#ecc8b6; }
       header button { color:white; background:transparent; border:0; padding:0 5px; font-size:18px; }
       label { display:block; margin:7px 0; }
-      input[type=password],input[type=text],select { display:block; width:100%; padding:6px 8px; margin-top:3px;
+      input[type=password],input[type=text],select,textarea { display:block; width:100%; padding:6px 8px; margin-top:3px;
         background:#fff; color:#172e41; border:1px solid #c3ced7; border-radius:5px; font:inherit; }
       input[type=checkbox] { vertical-align:middle; margin-right:6px; }
       details { border-top: 1px solid #e3eaf0; padding-top:8px; margin-top:9px; }
@@ -119,7 +128,13 @@
         <details id="settings">
           <summary>设置（首次使用请填写 API Key）</summary>
           <label>DeepSeek API Key <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off"></label>
-          <label>模型 <input id="model" type="text" placeholder="deepseek-flash"></label>
+          <label>文字题模型（推荐 deepseek-v4-pro）
+            <select id="model"><option value="deepseek-v4-pro">deepseek-v4-pro（高准确率）</option><option value="deepseek-flash">deepseek-flash（较省费用）</option></select>
+          </label>
+          <label>思考强度 <select id="reasoningEffort"><option value="high">high · 深度思考（推荐）</option><option value="max">max · 更深入（可能较慢）</option><option value="low">low · 较快</option><option value="none">none · 关闭思考（不推荐）</option></select></label>
+          <label><input id="doubleCheck" type="checkbox">二次独立复核：文字题用另一模型校对；不一致时不自动提交</label>
+          <label>课程参考资料（可选；例如学校提供的实验室安全守则）
+            <textarea id="reference" rows="4" maxlength="4500" placeholder="粘贴课程材料中与答题相关的规定；将随问题一起发送给 DeepSeek"></textarea></label>
           <label>播放速度 <select id="speed">
              <option value="1">1 倍</option><option value="1.25">1.25 倍</option>
              <option value="1.5">1.5 倍</option><option value="1.75">1.75 倍</option><option value="2">2 倍</option>
@@ -131,7 +146,7 @@
           <label><input id="autoApply" type="checkbox">自动逐项勾选 AI 建议的选项（多选题逐项校验，不覆盖已有选择）</label>
           <label><input id="autoSubmit" type="checkbox">自动提交视频习题（默认开启）</label>
           <label><input id="autoStart" type="checkbox">网页刷新后自动恢复任务（已配置 API Key 时）</label>
-          <p class="muted">工作流程：先扫描未完成课程→播放→弹题→DeepSeek→选项→提交→续播→自然结束→刷新→重新扫描。首次填写 API Key 后保存即可自动启动。AI 可能答错，调用会计费；仅处理视频习题，不操作考试页或伪造进度。</p>
+          <p class="muted">文字题默认使用 Pro+深度思考，图片题自动切换支持视觉的 Flash。独立复核可能消耗两次 API 调用；答案不一致、信息缺失或置信度低时停留在题目等待人工处理。课程材料会发送给 DeepSeek，请勿粘贴隐私或密钥。AI 仍可能答错。</p>
           <button id="save">保存设置</button><button id="export">导出日志</button>
         </details>
         <pre id="log"></pre>
@@ -148,11 +163,14 @@
   function showAnswer(question, result) {
     const labels = (result.answers || []).join('、') || '未能确定';
     $('answer').style.display = 'block';
-    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\nAI 建议：${labels}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}`;
+    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\nAI 建议：${labels}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n独立复核：${result.verified ? '两轮一致' : '未通过/未开启'}`;
   }
   function readPanel() {
     prefs.apiKey = $('apiKey').value.trim();
-    prefs.model = $('model').value.trim() || defaults.model;
+    prefs.model = $('model').value || defaults.model;
+    prefs.reasoningEffort = $('reasoningEffort').value || 'high';
+    prefs.doubleCheck = $('doubleCheck').checked;
+    prefs.reference = $('reference').value.slice(0, 4500);
     prefs.speed = Number($('speed').value) || 1;
     prefs.autoNext = $('autoNext').checked;
     prefs.autoAI = $('autoAI').checked;
@@ -166,7 +184,10 @@
   }
   function populatePanel() {
     $('apiKey').value = prefs.apiKey;
-    $('model').value = prefs.model;
+    $('model').value = ['deepseek-flash', 'deepseek-v4-pro'].includes(prefs.model) ? prefs.model : defaults.model;
+    $('reasoningEffort').value = prefs.reasoningEffort || 'high';
+    $('doubleCheck').checked = prefs.doubleCheck !== false;
+    $('reference').value = prefs.reference || '';
     $('speed').value = String(prefs.speed);
     for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart', 'autoLocate', 'refreshAfterEnd']) $(key).checked = prefs[key];
   }
@@ -524,17 +545,61 @@
     const input = el.querySelector('input[type=radio], input[type=checkbox]');
     return Boolean(input?.checked || el.querySelector('.ant-radio-checked,.ant-checkbox-checked') || el.getAttribute('aria-checked') === 'true');
   }
-  function normalizeAnswers(raw, count, multiple) {
-    let entries = Array.isArray(raw) ? raw : String(raw || '').toUpperCase().match(/[A-H]/g) || [];
-    entries = [...new Set(entries.flatMap(x => String(x).toUpperCase().match(/[A-H]/g) || []))];
-    return entries.filter(x => x.charCodeAt(0) - 65 < count).slice(0, multiple ? count : 1);
+  function normalizeAnswers(raw, choices, multiple) {
+    const valid = new Set(choices.map(o => o.letter));
+    // JSON answers must be an array of option labels. Reject explanatory prose and unknown options.
+    if (!Array.isArray(raw)) throw new Error('AI 未按 JSON 数组返回答案，已取消自动提交');
+    const answers = [];
+    for (const item of raw) {
+      if (typeof item !== 'string') throw new Error('AI 答案不是字母字符串');
+      const letter = item.trim().toUpperCase();
+      if (!valid.has(letter)) throw new Error(`AI 返回了无效选项 ${letter.slice(0, 10)}`);
+      if (!answers.includes(letter)) answers.push(letter);
+    }
+    if (!multiple && answers.length > 1) throw new Error('单选/判断题返回多个答案');
+    return answers.sort();
   }
-  function askDeepSeek(question) {
+  function sameLetters(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
+      a.every((v, i) => v === b[i]);
+  }
+  function validateChecks(rawChecks, choices, answers) {
+    if (!rawChecks || typeof rawChecks !== 'object' || Array.isArray(rawChecks))
+      throw new Error('AI 未逐项核验选项，本题停止自动作答');
+    const yes = [];
+    for (const choice of choices) {
+      const value = rawChecks[choice.letter];
+      if (value !== true && value !== false)
+        throw new Error(`AI 对选项 ${choice.letter} 未明确给出是否应选`);
+      if (value) yes.push(choice.letter);
+    }
+    if (!sameLetters(yes, answers))
+      throw new Error(`AI 答案与逐项核验矛盾：答案=${answers.join('、')}，逐项=${yes.join('、')}`);
+  }
+  const SYSTEM_PROMPT = `你是实验室安全教育题目核对助手。严格按照题干的提问方向逐项独立审查 A、B、C、D。
+  1. 先识别问法：如“正确的是”“错误的是”“不属于”“不能”“例外”“不正确”等。checks 的 true 表示【该项应被选中】，不是说该陈述事实为真。
+  2. 对每项分析相关实验室安全知识、化学品管理、电气与消防、生物安全、废物分类、PPE等；不可编造法律法规、国标编号、具体参数。
+  3. 多选题必须分别判断每一项，无论有几个正确选项都完整输出，不允许因为已选中一项而停止分析。
+  4. 判断题/单选题只能选择一项，且需要区分“正确”“错误”对应的选项文字。
+  5. 如课程资料与一般常识不一致，优先说明冲突并返回空答案；如果图片看不清、依据不足、或题目存在歧义，设置 confidence=低、answers=[]，并将 checks 各项都设为 false。
+  输出严格 JSON 对象（不要 Markdown）：{"answers":["A"],"checks":{"A":true,"B":false},"explanation":"简述问法及每项判断依据，尤其指出排除项原因","confidence":"高"}。checks 必须包含题目所有实际选项且值必须是 JSON 布尔值。`;
+  function askDeepSeek(question, { model, review = false } = {}) {
     return new Promise((resolve, reject) => {
       if (!prefs.apiKey) { reject(new Error('请在设置中填写 DeepSeek API Key')); return; }
-      const textPrompt = `题型：${question.typeName || (question.multiple ? '多选' : '单选/判断')}\n题干：${question.stem}\n${question.choices.map(o => `${o.letter}. ${o.text}`).join('\n')}\n请结合实验室安全规范分析，输出 JSON 对象：answers 为字母数组，explanation 为依据，confidence 为高/中/低；如不确定则 answers 为空数组。`;
       const hasImages = question.choices.some(o => o.imageUrl);
-      const content = hasImages ? [{ type:'text', text:textPrompt }] : textPrompt;
+      // Pro does not support vision; use Flash for image questions.
+      const actualModel = hasImages ? 'deepseek-flash' : (model || prefs.model || defaults.model);
+      const reference = clean(prefs.reference).slice(0, 4500);
+      const textPrompt = [
+        review ? '请独立重新解答此题。你不知道前一位模型的答案；请不要假定任何已有答案。' : '请完整独立解答此题。',
+        `题型：${question.typeName || (question.multiple ? '多选题' : '单选或判断题')}`,
+        `选择方式：${question.multiple ? '复选框（可以有多个答案）' : '单选框（只能有一个答案）'}`,
+        `题干（必须留意否定、例外或“错误”）：${question.stem}`,
+        ...question.choices.map(o => `${o.letter}. ${o.text || '[该项为图片，请查看图片]'}`),
+        reference ? `学校课程参考资料（只作参考，不代表题目提供的正确答案）：\n${reference}` : '',
+        '请对每个选项输出 checks，true 表示该选项应该被勾选；answers 必须严格等于所有 true 的字母集合。' 
+      ].filter(Boolean).join('\n');
+      const content = hasImages ? [{ type: 'text', text: textPrompt }] : textPrompt;
       if (hasImages) {
         for (const option of question.choices) {
           if (!option.imageUrl) continue;
@@ -542,41 +607,52 @@
             reject(new Error('发现图片选项，但图片地址不受支持；请手动答题'));
             return;
           }
-          content.push({ type:'text', text:`选项 ${option.letter} 对应的图片：` });
-          content.push({ type:'image_url', image_url: { url:option.imageUrl } });
+          content.push({ type: 'text', text: `选项 ${option.letter} 的图片：` });
+          content.push({ type: 'image_url', image_url: { url: option.imageUrl } });
         }
       }
+      const effort = ['none', 'low', 'high', 'max'].includes(prefs.reasoningEffort) ? prefs.reasoningEffort : 'high';
       const data = {
-        model: prefs.model || 'deepseek-flash',
+        model: actualModel,
         messages: [
-          { role:'system', content: '你是实验室安全教育辅导助手。依据题干、选项、图片（如有）及可靠的实验室安全知识作答，缺少依据时返回空答案。不得猜测。仅输出 JSON 对象，字段为 answers(字母数组)、explanation(中文简短解释)、confidence(高/中/低)。单选或判断只选一项，多选可选多个。' },
-          { role:'user', content }
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content }
         ],
-        response_format: { type:'json_object' },
-        reasoning_effort: 'none',
-        max_tokens: 550,
+        response_format: { type: 'json_object' },
+        reasoning_effort: effort,
+        // In thinking mode, the limit covers reasoning tokens as well as the final JSON answer.
+        max_tokens: effort === 'max' ? 16000 : effort === 'high' ? 10000 : 2500,
         stream: false
       };
       GM_xmlhttpRequest({
-        method: 'POST', url: API, timeout: 50000,
-        headers: { 'Content-Type':'application/json', 'Authorization':`Bearer ${prefs.apiKey}` },
+        method: 'POST', url: API, timeout: 150000,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${prefs.apiKey}` },
         data: JSON.stringify(data),
-        onload: (res) => {
+        onload: res => {
           try {
             const body = JSON.parse(res.responseText || '{}');
             if (res.status < 200 || res.status >= 300)
               throw new Error(`DeepSeek HTTP ${res.status}: ${clean(body.error?.message).slice(0, 180) || '请检查 API Key/余额/模型'}`);
+            if (body.choices?.[0]?.finish_reason === 'length')
+              throw new Error('AI 输出超出长度限制，已取消本题自动提交');
             let raw = clean(body.choices?.[0]?.message?.content);
-            raw = raw.replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
+            raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+            if (!raw) throw new Error('AI 返回了空答案（可能是 JSON 模式输出异常）');
             const parsed = JSON.parse(raw);
+            const answers = normalizeAnswers(parsed.answers, question.choices, question.multiple);
+            validateChecks(parsed.checks, question.choices, answers);
+            const confidence = clean(parsed.confidence);
+            if (!['高', '中', '低'].includes(confidence)) throw new Error('AI 未返回明确可靠性等级');
             resolve({
-              answers: normalizeAnswers(parsed.answers, question.choices.length, question.multiple),
-              explanation: clean(parsed.explanation).slice(0, 750),
-              confidence: clean(parsed.confidence).slice(0, 12) || '未评估'
+              answers,
+              explanation: clean(parsed.explanation).slice(0, 1100),
+              confidence,
+              model: actualModel,
+              verified: false
             });
-          } catch (e) { reject(e); }
+          } catch (error) { reject(error); }
         },
-        ontimeout: () => reject(new Error('DeepSeek 请求超时')),
+        ontimeout: () => reject(new Error('DeepSeek 请求超时，请检查网络或降低思考强度')),
         onerror: () => reject(new Error('API 连接失败，请检查网络与油猴跨域权限'))
       });
     });
@@ -682,9 +758,38 @@
       const answer = await askDeepSeek(q);
       lastResult = { q, answer };
       showAnswer(q, answer);
-      log(`DeepSeek 建议：${answer.answers.join('、') || '不确定'}；可靠性 ${answer.confidence}`);
-      if (running && prefs.autoApply && answer.answers.length) {
-        if (answer.confidence === '低') log('提醒：AI 自评可靠性低，自动选择仍可能答错');
+      log(`首轮 ${answer.model}：${answer.answers.join('、') || '不确定'}；可靠性 ${answer.confidence}`);
+      if (!running) { setStatus('已给出建议，请人工核对'); return; }
+      if (!answer.answers.length || answer.confidence === '低') {
+        log('AI 无法确定或自评可靠性低：不自动勾选/提交，等待人工核对');
+        setStatus('该题需人工核对'); return;
+      }
+      if (prefs.doubleCheck) {
+        const hasImages = q.choices.some(o => o.imageUrl);
+        const reviewModel = hasImages ? 'deepseek-flash' : (answer.model === 'deepseek-v4-pro' ? 'deepseek-flash' : 'deepseek-v4-pro');
+        setStatus(`第二轮独立复核（${reviewModel}）...`);
+        log(`正在调用 ${reviewModel} 独立复核（不向第二模型展示首轮答案）`);
+        let second;
+        try {
+          second = await askDeepSeek(q, { model: reviewModel, review: true });
+        } catch (e) {
+          log(`二次复核失败：${e.message || e}；不会自动提交`);
+          setStatus('二次复核异常，待人工核对'); return;
+        }
+        log(`复核 ${reviewModel}：${second.answers.join('、') || '不确定'}；可靠性 ${second.confidence}`);
+        if (!sameLetters(answer.answers, second.answers) || second.confidence === '低') {
+          answer.confidence = '低';
+          answer.explanation += `
+【复核存在分歧】第二轮建议：${second.answers.join('、') || '不确定'}；${second.explanation}`;
+          showAnswer(q, answer);
+          log('两轮结果不一致或复核可靠性低：暂停自动提交，请人工核对');
+          setStatus('两轮答案分歧，待人工核对'); return;
+        }
+        answer.verified = true;
+        log('两轮独立答案一致，准备按原有方式逐项勾选');
+      }
+      showAnswer(q, answer);
+      if (running && prefs.autoApply) {
         const applied = await applyAnswers(q, answer.answers);
         if (applied) await maybeSubmit(q, answer.answers);
       }
