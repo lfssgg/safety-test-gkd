@@ -2,7 +2,7 @@
 
 > 适用于**中国科学院大学实验室安全育人智慧学习系统**课程页面的 Tampermonkey 用户脚本。通过 DeepSeek API 辅助识别视频随堂习题，并按网站原有的播放、提交与课程切换流程运行。
 >
-> **当前版本：v1.3.0｜非官方项目｜仅供个人学习与技术交流**
+> **当前版本：v1.3.1｜非官方项目｜仅供个人学习与技术交流**
 
 ## ✨ 主要功能
 
@@ -53,18 +53,34 @@
 
 ### 安装步骤
 
-0. 如果已经安装 Tampermonkey， 直接在源代码页右上角，点击Raw即可跳转到安装页面。
-<img width="1581" height="597" alt="image" src="https://github.com/user-attachments/assets/1a5257dd-91d5-4394-af73-ca8f85c29e9c" />
-
-
-1. 下载本仓库的 [`UCAS_实安课堂_DeepSeek全自动学习助手_v1.3_UTF8.user.js`](./UCAS_实安课堂_DeepSeek全自动学习助手_v1.3_UTF8.user.js)。如果仓库中使用了其他脚本文件名，请以实际文件为准。
+1. 推荐直接打开 **[安装最新版油猴脚本](https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js)**，让 Tampermonkey 识别并安装；如果浏览器仅下载文件，也可下载 [`ucas-study.user.js`](./ucas-study.user.js) 后通过 Tampermonkey 的「实用工具」→「导入」安装。
 2. 在 Tampermonkey 中选择「管理面板」→「实用工具」→「导入」，选择上述 `.user.js` 文件并安装。
 3. **禁用旧版 v1.1 / v1.2 或其他同类脚本**，避免多个自动学习助手同时操作网页。
-4. 登录课程网站并打开课程详情页，右下角应显示「实安课堂 · DeepSeek 助手 v1.3.0」。
+4. 登录课程网站并打开课程详情页，右下角应显示「实安课堂 · DeepSeek 助手 v1.3.1」。
 5. 展开「设置」，填写自己的 **DeepSeek API Key**，按需调整模型、倍速及自动化选项，点击「保存设置」。
 6. 首次配置后可点击「开始全自动学习」；开启自动恢复且已配置 Key 时，刷新页面也会尝试自动运行。
 
 > 如果浏览器阻止自动播放，需要先在网页中手动点击一次视频播放键。
+
+## 🔄 GitHub 自动更新
+
+脚本已设置固定的 GitHub 更新地址，Tampermonkey 会按自身检查周期比较在线脚本的 `@version` 版本号：
+
+```javascript
+// @updateURL    https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js
+// @downloadURL  https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js
+```
+
+**首次启用：** 先从上述 [安装地址](https://raw.githubusercontent.com/lfssgg/safety-test-gkd/main/ucas-study.user.js) 重新安装一次带更新元数据的脚本，并停用旧版。以后更新通过 Tampermonkey 检查即可；**仅上传到 GitHub 不会令以前安装的脚本自动具备更新地址**。
+
+**发布新版：**
+
+1. 编辑仓库根目录的 `ucas-study.user.js`，保持文件名和路径不变。
+2. 同时增加头部的 `// @version` 和源码中的 `const VERSION`，例如从 `1.3.1` 升为 `1.4.0`。
+3. 提交到 `main` 分支，等 GitHub Raw 文件可访问后，Tampermonkey 才能发现更新。
+4. 在 Tampermonkey 中检查脚本自动更新是否启用；也可以在管理面板手动检查更新。更新时间取决于扩展设置、网络及浏览器运行状态，**不是推送到 GitHub 就立刻同步**。
+
+本项目目前假定仓库使用 `main` 分支。如果你改用其他默认分支，必须同步修改脚本中的两个 URL，已经安装的旧客户端也需要重新导入正确版本。
 
 ## ⚙️ 配置选项
 
@@ -129,7 +145,7 @@ v1.3 会核对最终勾选结果。如果 DeepSeek 只返回一个选项，或�
 <details>
 <summary>打开脚本时中文显示乱码？</summary>
 
-请使用 UTF-8 编码打开文件。仓库中的 v1.3 `_UTF8.user.js` 使用 UTF-8 BOM 以改善部分 Windows 编辑器的识别情况。
+请使用 UTF-8 编码打开文件。仓库中的 `ucas-study.user.js` 使用 UTF-8 BOM 以改善部分 Windows 编辑器的识别情况。
 </details>
 
 ## 🔐 隐私、安全与限制
@@ -151,10 +167,10 @@ v1.3 已通过 JavaScript 语法检查及基于保存网页的本地模拟测试
 
 ```text
 README.md
-UCAS_实安课堂_DeepSeek全自动学习助手_v1.3_UTF8.user.js
+ucas-study.user.js
 ```
 
-如果将脚本重命名为更短的文件名，请同时修改本 README 中的下载链接。
+请保持 `ucas-study.user.js` 文件名和在仓库根目录的位置不变，以免已经安装的用户失去更新来源。
 
 ## ⚠️ 免责声明
 
