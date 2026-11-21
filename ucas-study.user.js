@@ -1,8 +1,8 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         UCAS 实安课堂 · DeepSeek 学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      1.3.1
-// @description  视频习题出现时自动调用 DeepSeek、勾选并提交，提交后继续播放，播放结束自动切下一课；不伪造学习进度。
+// @version      1.4.0
+// @description  视频习题出现时自动调用 DeepSeek、勾选并提交，提交后继续播放，播放结束自动刷新课程进度，定位首个未完成视频；不伪造学习进度。
 // @author       ChatGPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
@@ -21,7 +21,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.3.1';
+  const VERSION = '1.4.0';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
@@ -29,7 +29,8 @@
 
   const defaults = {
     apiKey: '', model: 'deepseek-flash', speed: 1.5,
-    autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true
+    autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true,
+    autoLocate: true, refreshAfterEnd: true
   };
   // 迁移 v1.1 设置：沿用 API Key/倍速，首次升级时开启用户要求的完整自动模式。
   const saved = GM_getValue('ucas-ds-options-v1', {}) || {};
@@ -49,6 +50,9 @@
   const seenVideos = new WeakSet();
   let pendingNext = false;
   let navigating = false;
+  let reloading = false;
+  let locating = Boolean(running && prefs.autoLocate && /\/students\/courseDetail/i.test(location.pathname));
+  let locateTask = null;
   let thinking = false;
   const retryAfter = new Map();
   let lastResult = null;
@@ -120,12 +124,14 @@
              <option value="1">1 倍</option><option value="1.25">1.25 倍</option>
              <option value="1.5">1.5 倍</option><option value="1.75">1.75 倍</option><option value="2">2 倍</option>
           </select></label>
-          <label><input id="autoNext" type="checkbox">课程播放完毕后切换下一节未学完课程</label>
+          <label><input id="autoNext" type="checkbox">课程播放完毕后继续下一节未完成课程</label>
+          <label><input id="autoLocate" type="checkbox">进入或刷新网页时，自动定位首个未完成视频</label>
+          <label><input id="refreshAfterEnd" type="checkbox">视频正常结束后刷新网页，读取平台最新进度</label>
           <label><input id="autoAI" type="checkbox">检测到习题时自动调用 DeepSeek</label>
           <label><input id="autoApply" type="checkbox">自动逐项勾选 AI 建议的选项（多选题逐项校验，不覆盖已有选择）</label>
           <label><input id="autoSubmit" type="checkbox">自动提交视频习题（默认开启）</label>
           <label><input id="autoStart" type="checkbox">网页刷新后自动恢复任务（已配置 API Key 时）</label>
-          <p class="muted">工作流程：弹题→DeepSeek→选项→提交→续播→自然结束后下一课程。首次填写 API Key 后保存即可自动启动。AI 可能答错，调用会计费；仅处理视频习题，不操作考试页或伪造进度。</p>
+          <p class="muted">工作流程：先扫描未完成课程→播放→弹题→DeepSeek→选项→提交→续播→自然结束→刷新→重新扫描。首次填写 API Key 后保存即可自动启动。AI 可能答错，调用会计费；仅处理视频习题，不操作考试页或伪造进度。</p>
           <button id="save">保存设置</button><button id="export">导出日志</button>
         </details>
         <pre id="log"></pre>
@@ -153,6 +159,8 @@
     prefs.autoApply = $('autoApply').checked;
     prefs.autoSubmit = $('autoSubmit').checked;
     prefs.autoStart = $('autoStart').checked;
+    prefs.autoLocate = $('autoLocate').checked;
+    prefs.refreshAfterEnd = $('refreshAfterEnd').checked;
     save();
     if (boundVideo) boundVideo.playbackRate = prefs.speed;
   }
@@ -160,7 +168,7 @@
     $('apiKey').value = prefs.apiKey;
     $('model').value = prefs.model;
     $('speed').value = String(prefs.speed);
-    for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart']) $(key).checked = prefs[key];
+    for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart', 'autoLocate', 'refreshAfterEnd']) $(key).checked = prefs[key];
   }
 
   // 根据实际 HTML：右侧 .right .title、HTML5 video、左侧 ant-tree 目录。
@@ -178,7 +186,7 @@
     $('progress').textContent = `播放：${fmt(t)} / ${d ? fmt(d) : '--:--'} · ${boundVideo.playbackRate}×`;
   }
   async function playVideo() {
-    if (!running || !boundVideo) return;
+    if (!running || !boundVideo || locating || reloading || pendingNext) return;
     if (activeVideoQuiz()) { log('视频习题弹窗打开中，保持暂停等待答题'); return; }
     try {
       boundVideo.playbackRate = prefs.speed;
@@ -205,19 +213,23 @@
         pendingNext = true;
         log('视频自然播放结束，等待平台记录和可能出现的随堂题');
         // 留出平台提交学习进度、显示随堂题的时间；不进行进度伪造。
-        setTimeout(() => { if (running && pendingNext) attemptNext(); }, 6000);
+        setTimeout(() => { if (running && pendingNext) attemptNext(); }, 8500);
       });
     }
     log(changed ? '检测到课程视频地址变化' : '检测到 HTML5 视频播放器');
-    if (running && !pendingNext) playVideo();
+    if (running && !pendingNext && !locating && !reloading) playVideo();
   }
+  // 网站课程目录由 myCourseTypeTree 异步加载，当前页面 URL 的 id 并不随
+  // 目录内切课同步更新。因此刷新后必须重新选择未完成课程，不能直接播放默认视频。
   function treeLeaf(li) {
     const target = li?.querySelector(':scope > .ant-tree-node-content-wrapper');
     const title = clean(target?.querySelector('.ant-tree-title')?.textContent || target?.getAttribute('title'));
     if (!target || !title) return null;
-    if (/^[（(]\s*学完\s*[）)]/.test(title)) return null;
-    if (/^[（(]\s*(?:未学|\d+(?:\.\d+)?%)\s*[）)]/.test(title)) return { target, title };
-    return null;
+    const marker = title.match(/^[（(]\s*(学完|已学|完成|未学|\d+(?:\.\d+)?\s*%)\s*[）)]/);
+    if (!marker) return null;
+    const state = marker[1].replace(/\s/g, '');
+    if (/^(学完|已学|完成)$/.test(state) || state === '100%') return { target, title, complete: true };
+    return { target, title, complete: false };
   }
   function directChildren(parent) {
     if (!parent) return [];
@@ -229,6 +241,156 @@
       node = node.parentElement?.closest('li[role="treeitem"]');
     }
     return node;
+  }
+  function selectedLesson() {
+    const tree = document.querySelector('ul.custom-tree.ant-tree');
+    return tree?.querySelector('li.ant-tree-treenode-selected') ||
+      tree?.querySelector('.ant-tree-node-selected')?.closest('li[role="treeitem"]') || null;
+  }
+  function isCourseDetail() { return /\/students\/courseDetail/i.test(location.pathname); }
+  async function waitForCourseTree() {
+    for (let n = 0; n < 65; n++) {
+      if (!running || !isCourseDetail()) return null;
+      const tree = document.querySelector('ul.custom-tree.ant-tree');
+      if (tree && directChildren(tree).length && tree.querySelector('.ant-tree-title')) return tree;
+      await sleep(400);
+    }
+    return null;
+  }
+  async function expandSection(section) {
+    let childTree = section.querySelector(':scope > ul.ant-tree-child-tree');
+    if (childTree && childTree.classList.contains('ant-tree-child-tree-open')) return childTree;
+    const switcher = section.querySelector(':scope > .ant-tree-switcher');
+    if (!switcher || switcher.classList.contains('ant-tree-switcher-noop')) return childTree;
+    if (!section.classList.contains('ant-tree-treenode-switcher-open')) {
+      switcher.click();
+      await sleep(250);
+    }
+    for (let n = 0; n < 6; n++) {
+      childTree = section.querySelector(':scope > ul.ant-tree-child-tree');
+      if (childTree && childTree.classList.contains('ant-tree-child-tree-open')) return childTree;
+      // a-tree 中没有子节点的标题点击后仍然保持 close，无须逐项长时间等待。
+      if (!section.classList.contains('ant-tree-treenode-switcher-open')) return null;
+      await sleep(170);
+    }
+    return null;
+  }
+  // 按课程目录顺序扫描所有大章节；遇到“未学”或 0%~99% 即停止。
+  // 不依赖 selectedKeys，也不从 URL 的旧 id 推断观看进度。
+  async function firstUnfinishedLesson(tree) {
+    let inspected = 0;
+    let canceled = false;
+    async function inspect(node, depth) {
+      if (!running || !locating || activeVideoQuiz()) { canceled = true; return null; }
+      const leaf = treeLeaf(node);
+      if (leaf) { // 有实际课程进度标识的节点是视频，不能把章节当作视频点击。
+        inspected++;
+        return leaf.complete ? null : leaf;
+      }
+      if (depth >= 6) return null;
+      const subTree = await expandSection(node);
+      if (!subTree) return null;
+      for (const child of directChildren(subTree)) {
+        const found = await inspect(child, depth + 1);
+        if (found || canceled) return found;
+      }
+      return null;
+    }
+    // 所有一级章节均在这里扫描，不再依赖刷新后网页默认的 selectedKeys。
+    const count = directChildren(tree).length;
+    for (let index = 0; index < count; index++) {
+      const root = directChildren(tree)[index];
+      if (!root) continue;
+      const leaf = await inspect(root, 0);
+      if (leaf || canceled) return { leaf, inspected, canceled };
+    }
+    return { leaf: null, inspected };
+  }
+  async function selectAndConfirmLesson(leaf) {
+    if (!leaf?.target?.isConnected) return false;
+    const previous = selectedLesson();
+    const wasSelected = previous?.contains(leaf.target) || previous === leaf.target.closest('li[role="treeitem"]');
+    if (wasSelected) {
+      log(`定位结果：当前即为首个未完成课程 ${leaf.title}`);
+      return true;
+    }
+    const oldTitle = courseTitle();
+    const oldSrc = document.querySelector('.right video, video')?.getAttribute('src') || '';
+    log(`重新定位：${leaf.title}`);
+    leaf.target.click(); // 仅操作网页 UI，按站点原有逻辑加载视频
+    for (let n = 0; n < 36; n++) {
+      if (!running || !locating) return false;
+      await sleep(350);
+      attachVideo();
+      const now = selectedLesson();
+      const correctSelected = now?.contains(leaf.target) || now === leaf.target.closest('li[role="treeitem"]');
+      const newSrc = document.querySelector('.right video, video')?.getAttribute('src') || '';
+      // 只在 Vue 的视频/标题完成切换后播放，避免仍在播刷新后默认的旧课程。
+      if (correctSelected && (courseTitle() !== oldTitle || (newSrc && oldSrc && newSrc !== oldSrc))) {
+        log('已确认课程切换成功，开始播放选中的未完成视频');
+        return true;
+      }
+    }
+    log('课程目录已点击，但未确认视频已切换；为避免误播已完成视频，暂停自动播放');
+    return false;
+  }
+  function beginLocate(reason = '进入课程页面') {
+    if (locateTask) return locateTask;
+    if (!running) return Promise.resolve(false);
+    if (!prefs.autoLocate || !isCourseDetail()) {
+      locating = false;
+      playVideo();
+      return Promise.resolve(true);
+    }
+    locating = true;
+    locateTask = (async () => {
+      let canPlay = false;
+      try {
+        setStatus('读取课程进度中...');
+        log(`${reason}：等待课程目录加载，定位第一个未完成视频`);
+        const tree = await waitForCourseTree();
+        if (!tree) {
+          log('课程目录等待超时；未启动默认视频，防止误刷已完成课程');
+          setStatus('未加载课程目录');
+          return false;
+        }
+        const found = await firstUnfinishedLesson(tree);
+        if (found.canceled) return false;
+        if (!found.leaf) {
+          log(found.inspected ? `已检查 ${found.inspected} 节：未发现未完成课程` : '目录中没有可识别的进度标记，请核对页面是否加载完毕');
+          setStatus(found.inspected ? '未发现未完成课程' : '无法识别进度标记');
+          return false;
+        }
+        canPlay = await selectAndConfirmLesson(found.leaf);
+        if (canPlay) {
+          attachVideo();
+          setStatus('已定位未完成课程');
+        } else setStatus('课程切换未确认');
+        return canPlay;
+      } catch (e) {
+        log(`定位未完成课程异常：${e?.message || e}`);
+        setStatus('课程定位异常');
+        return false;
+      } finally {
+        locating = false;
+        locateTask = null;
+        if (canPlay && running) playVideo();
+      }
+    })();
+    return locateTask;
+  }
+  function refreshForNextLesson() {
+    if (!running || reloading || !isCourseDetail()) return false;
+    if (activeVideoQuiz()) return false;
+    reloading = true;
+    pendingNext = false;
+    const current = selectedLesson()?.querySelector(':scope > .ant-tree-node-content-wrapper .ant-tree-title')?.textContent || courseTitle();
+    sessionStorage.setItem(RUN_KEY, '1');
+    sessionStorage.setItem('ucas-ds-last-finished', JSON.stringify({ title: clean(current), at: Date.now() }));
+    setStatus('视频结束，刷新课程进度...');
+    log('视频正常结束并等待平台记录；即将刷新并重新查找第一个未完成视频');
+    setTimeout(() => location.reload(), 450);
+    return true;
   }
   async function resolveNextLesson() {
     const tree = document.querySelector('ul.custom-tree.ant-tree');
@@ -270,7 +432,7 @@
     return null;
   }
   async function goNext(manual = false) {
-    if (navigating) return false;
+    if (navigating || locating || reloading) return false;
     if (activeVideoQuiz()) { log('当前有尚未处理的视频习题，暂不切课'); return false; }
     if (!manual && (!running || !prefs.autoNext)) return false;
     navigating = true;
@@ -309,7 +471,8 @@
       log('检测到视频习题，等待自动答题成功后再切课');
       return;
     }
-    goNext(false);
+    if (prefs.refreshAfterEnd && isCourseDetail()) refreshForNextLesson();
+    else goNext(false);
   }
 
   // 基于用户保存的真实「视频习题」DOM 和课程路由 chunk-c4b12c1e.js 精确适配。
@@ -543,14 +706,17 @@
     save();
     sessionStorage.setItem(RUN_KEY, '1');
     setStatus('运行中');
+    locating = Boolean(prefs.autoLocate && isCourseDetail());
     attachVideo();
-    playVideo();
-    log('开始学习，视频按正常播放进度运行');
+    if (locating) beginLocate('手动启动');
+    else playVideo();
+    log('开始学习：先定位未完成课程，再按正常播放进度运行');
     if (prefs.autoAI) solveOne();
   }
   function stop() {
     running = false;
     pendingNext = false;
+    locating = false;
     prefs.autoStart = false;
     $('autoStart').checked = false;
     save();
@@ -580,15 +746,16 @@
   });
 
   populatePanel();
-  log(`脚本 ${VERSION} 就绪：已修复多选题逐个勾选及核验；弹题自动解答、提交、续播、切课`);
+  log(`脚本 ${VERSION} 就绪：网页刷新后重新定位未完成课程；视频完成后可刷新进度`);
   if (document.getElementById('ucas-study-helper')) log('发现另一个实安课堂助手，请避免同时开启两个自动学习脚本');
   setStatus(running ? '全自动运行中' : '待机：填写 API Key 后保存并开始');
   attachVideo();
   updateProgress();
   if (running) {
     sessionStorage.setItem(RUN_KEY, '1');
-    log('已自动恢复完整学习流程');
-    playVideo();
+    log('已自动恢复学习流程，先读取最新课程完成状态');
+    if (locating) beginLocate('刷新/首次进入');
+    else playVideo();
     if (prefs.autoAI) solveOne(false);
   }
   let ticks = 0;
@@ -597,9 +764,9 @@
     attachVideo();
     if (++ticks % 2 === 0) updateProgress();
     if (running && prefs.autoAI && !thinking) solveOne(false);
-    if (running && pendingNext && !thinking && !navigating && ticks % 4 === 0) attemptNext();
+    if (running && pendingNext && !thinking && !navigating && !locating && !reloading && ticks % 4 === 0) attemptNext();
     // 弹题提交成功后通常由网站自己恢复播放；偶发未续播时作辅助恢复。
-    if (running && !pendingNext && !thinking && ticks % 4 === 0 && boundVideo &&
+    if (running && !pendingNext && !thinking && !locating && !reloading && ticks % 4 === 0 && boundVideo &&
         boundVideo.paused && !boundVideo.ended && !activeVideoQuiz() &&
         boundVideo.readyState >= 2) playVideo();
   }, 1600);
