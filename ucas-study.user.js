@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UCAS 实安课堂 · DeepSeek 学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      1.5.0
-// @description  视频题自动调用 DeepSeek 深度思考并二次复核，确认后勾选提交；视频结束刷新并定位未完成课程。不保证答案正确。
+// @version      1.6.0
+// @description  视频题 DeepSeek 深度思考＋官方联网搜索核实＋可选独立复核；证据不足停止自动提交，视频结束刷新定位未完成课程。
 // @author       ChatGPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
@@ -21,7 +21,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
@@ -29,7 +29,7 @@
 
   const defaults = {
     apiKey: '', model: 'deepseek-v4-pro', speed: 1.5,
-    reasoningEffort: 'high', doubleCheck: true, reference: '',
+    reasoningEffort: 'high', doubleCheck: true, webVerify: true, reference: '',
     autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true,
     autoLocate: true, refreshAfterEnd: true
   };
@@ -133,6 +133,7 @@
           </label>
           <label>思考强度 <select id="reasoningEffort"><option value="high">high · 深度思考（推荐）</option><option value="max">max · 更深入（可能较慢）</option><option value="low">low · 较快</option><option value="none">none · 关闭思考（不推荐）</option></select></label>
           <label><input id="doubleCheck" type="checkbox">二次独立复核：文字题用另一模型校对；不一致时不自动提交</label>
+          <label><input id="webVerify" type="checkbox">联网核实答案（推荐）：使用 DeepSeek 官方搜索，必须有真实网页来源且答案一致才提交</label>
           <label>课程参考资料（可选；例如学校提供的实验室安全守则）
             <textarea id="reference" rows="4" maxlength="4500" placeholder="粘贴课程材料中与答题相关的规定；将随问题一起发送给 DeepSeek"></textarea></label>
           <label>播放速度 <select id="speed">
@@ -146,7 +147,7 @@
           <label><input id="autoApply" type="checkbox">自动逐项勾选 AI 建议的选项（多选题逐项校验，不覆盖已有选择）</label>
           <label><input id="autoSubmit" type="checkbox">自动提交视频习题（默认开启）</label>
           <label><input id="autoStart" type="checkbox">网页刷新后自动恢复任务（已配置 API Key 时）</label>
-          <p class="muted">文字题默认使用 Pro+深度思考，图片题自动切换支持视觉的 Flash。独立复核可能消耗两次 API 调用；答案不一致、信息缺失或置信度低时停留在题目等待人工处理。课程材料会发送给 DeepSeek，请勿粘贴隐私或密钥。AI 仍可能答错。</p>
+          <p class="muted">文字题默认 Pro+深度思考，图片题自动使用 Flash。联网核实使用同一个 DeepSeek Key 和官方 deepseek_web_search 工具；启用联网核实+独立复核时最多会发起三轮模型请求。没有实际搜索来源、答案分歧或置信度低时不自动提交。联网结果可能不准确，课程资料会发送给 DeepSeek，请勿填写隐私或密钥。</p>
           <button id="save">保存设置</button><button id="export">导出日志</button>
         </details>
         <pre id="log"></pre>
@@ -163,13 +164,14 @@
   function showAnswer(question, result) {
     const labels = (result.answers || []).join('、') || '未能确定';
     $('answer').style.display = 'block';
-    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\nAI 建议：${labels}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n独立复核：${result.verified ? '两轮一致' : '未通过/未开启'}`;
+    $('answer').textContent = `题目：${question.stem.slice(0, 115)}\nAI 建议：${labels}\n解释：${result.explanation || '无'}\n可靠性：${result.confidence || '未评估'}\n联网核实：${result.webVerified ? '已检索并与首轮一致' : (result.webChecked ? '证据不足/未通过' : '尚未核实/未开启')}\n网页来源：${(result.sources || []).map(v => v.url).slice(0, 4).join('\n') || '无'}\n独立复核：${result.verified ? '两轮一致' : '未通过/未开启'}`;
   }
   function readPanel() {
     prefs.apiKey = $('apiKey').value.trim();
     prefs.model = $('model').value || defaults.model;
     prefs.reasoningEffort = $('reasoningEffort').value || 'high';
     prefs.doubleCheck = $('doubleCheck').checked;
+    prefs.webVerify = $('webVerify').checked;
     prefs.reference = $('reference').value.slice(0, 4500);
     prefs.speed = Number($('speed').value) || 1;
     prefs.autoNext = $('autoNext').checked;
@@ -187,6 +189,7 @@
     $('model').value = ['deepseek-flash', 'deepseek-v4-pro'].includes(prefs.model) ? prefs.model : defaults.model;
     $('reasoningEffort').value = prefs.reasoningEffort || 'high';
     $('doubleCheck').checked = prefs.doubleCheck !== false;
+    $('webVerify').checked = prefs.webVerify !== false;
     $('reference').value = prefs.reference || '';
     $('speed').value = String(prefs.speed);
     for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart', 'autoLocate', 'refreshAfterEnd']) $(key).checked = prefs[key];
@@ -657,6 +660,135 @@
       });
     });
   }
+  // v1.6 使用 DeepSeek 官方联网工具：Chat Completions + deepseek_web_search。
+  // 官方要求：声明联网工具时 response_format 只能是 text；不能传 json_object。
+  // 将联网答案作为独立校对，且从服务端工具实际执行记录提取来源，不能只信模型编造的 URL。
+  function parseSearchJson(text) {
+    let raw = String(text || '').trim();
+    if (!raw) throw new Error('联网核实返回空正文');
+    raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    try { return JSON.parse(raw); } catch (_) { /* 有时联网回答会多一行引导文字 */ }
+    for (let start = raw.indexOf('{'); start >= 0; start = raw.indexOf('{', start + 1)) {
+      let depth = 0, quoted = false, escaped = false;
+      for (let pos = start; pos < raw.length; pos++) {
+        const c = raw[pos];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (c === '\\') escaped = true;
+          else if (c === '"') quoted = false;
+        } else if (c === '"') quoted = true;
+        else if (c === '{') depth++;
+        else if (c === '}') {
+          depth--;
+          if (depth === 0) {
+            try { return JSON.parse(raw.slice(start, pos + 1)); } catch (_) { break; }
+          }
+        }
+      }
+    }
+    throw new Error('联网核实未返回可解析的 JSON：保留当前题目人工核对');
+  }
+  function actualSearchSources(message, body) {
+    const sources = new Map();
+    let completed = 0;
+    function record(url, title) {
+      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return;
+      try {
+        const normalized = new URL(url);
+        if (!['http:', 'https:'].includes(normalized.protocol)) return;
+        const safe = normalized.href.slice(0, 500);
+        if (!sources.has(safe)) sources.set(safe, { url: safe, title: clean(title).slice(0, 110) });
+      } catch (_) { /* 忽略无法打开的来源 */ }
+    }
+    for (const step of message.server_tool_calls || []) {
+      for (const call of step.calls || []) {
+        if (call.type !== 'deepseek_web_search' || call.status !== 'completed') continue;
+        if (['search', 'deep_search', 'image_search', 'deep_image_search'].includes(call.kind)) completed++;
+        for (const source of call.sources || []) record(source.url, source.title);
+        if (call.page && call.action?.type === 'open_page') record(call.page.url, call.page.title);
+      }
+    }
+    const usage = body.usage?.server_tool_use || {};
+    const toolCount = Number(usage.tool_search || 0) + Number(usage.tool_fetch || 0) + Number(usage.tool_image_search || 0);
+    // annotations 只能在真的存在服务端联网活动时作为来源；不能独立用来证明联网。
+    if (completed > 0 || toolCount > 0) {
+      for (const ann of message.annotations || []) {
+        if (ann.type === 'url_citation') record(ann.url_citation?.url, ann.url_citation?.title);
+      }
+    }
+    return { sources: [...sources.values()].slice(0, 8), searched: completed > 0 || toolCount > 0, toolCount };
+  }
+  function askWebVerify(question) {
+    return new Promise((resolve, reject) => {
+      if (!prefs.apiKey) { reject(new Error('请先填写 DeepSeek API Key')); return; }
+      const imageOptions = question.choices.filter(o => o.imageUrl);
+      const userText = [
+        `请务必先使用已提供的 deepseek_web_search 工具进行网络检索，尽量检索两种不同关键词，并优先依据实验室安全规范、学校教材和消防/化学品权威部门内容。`,
+        `请独立于任何先前答案，以网络事实证据逐个判断所有选项。搜索结果可能过时、错误或以题库网站为主，不能仅凭一条未经核实的答案采信。`,
+        `题型：${question.typeName || (question.multiple ? '多选' : '单选/判断')}。${question.multiple ? '可以选多个字母' : '只能选一个字母'}。`,
+        `题干：${question.stem}`,
+        ...question.choices.map(o => `${o.letter}. ${o.text || '[图片选项]'}`),
+        clean(prefs.reference) ? `课程资料：${clean(prefs.reference).slice(0, 4500)}` : '',
+        '注意“错误的是”“不属于”“不能”等反向提问；checks=true 的意思是该项应被选中。',
+        '如果确有可支持结论的联网证据，请仅输出严格 JSON（不需代码围栏）：{"answers":["A"],"checks":{"A":true,"B":false},"explanation":"注明检索的关键事实及相互矛盾之处","confidence":"高"}。',
+        '如果查不到能支持判断的证据、题目歧义或图片无法识别，请返回 answers=[]、全部 checks=false 且 confidence="低"。字母和 checks 必须涵盖本题所有选项。'
+      ].filter(Boolean).join('\n');
+      const content = imageOptions.length ? [{ type: 'text', text: userText }] : userText;
+      if (imageOptions.length) {
+        for (const o of imageOptions) {
+          if (!/^(https?:|data:image\/)/i.test(o.imageUrl)) {
+            reject(new Error('图片选项地址不受支持，请人工核对')); return;
+          }
+          content.push({ type: 'text', text: `选项 ${o.letter} 的图片` });
+          content.push({ type: 'image_url', image_url: { url: o.imageUrl } });
+        }
+      }
+      const requestData = {
+        model: 'deepseek-flash',
+        messages: [
+          { role: 'system', content: '你是实验室安全知识联网核实助手。必须先实际搜索证据，逐个核对题干及选项；不允许编造网页来源。仅在有依据时选答案，输出可解析的 JSON 对象。' },
+          { role: 'user', content }
+        ],
+        tools: [{ type: 'deepseek_web_search' }],
+        tool_choice: 'auto',
+        reasoning_effort: 'high',
+        max_tokens: 14000,
+        stream: false
+        // 不得设置 response_format: {type:'json_object'}：官方联网工具只允许 text。
+      };
+      GM_xmlhttpRequest({
+        method: 'POST', url: API, timeout: 210000,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${prefs.apiKey}` },
+        data: JSON.stringify(requestData),
+        onload: res => {
+          try {
+            const body = JSON.parse(res.responseText || '{}');
+            if (res.status < 200 || res.status >= 300 || body.error)
+              throw new Error(`DeepSeek 联网 HTTP ${res.status}: ${clean(body.error?.message).slice(0, 160) || '检查余额和联网权限'}`);
+            const first = body.choices?.[0];
+            if (!first || first.finish_reason !== 'stop')
+              throw new Error(`联网核实未完整结束（${first?.finish_reason || '未知'}）`);
+            const evidence = actualSearchSources(first.message || {}, body);
+            if (!evidence.searched || evidence.sources.length === 0)
+              throw new Error('模型未实际完成可核验的联网搜索，或没有返回网页来源；不会自动提交');
+            const parsed = parseSearchJson(first.message?.content);
+            const answers = normalizeAnswers(parsed.answers, question.choices, question.multiple);
+            validateChecks(parsed.checks, question.choices, answers);
+            const confidence = clean(parsed.confidence);
+            if (!['高', '中', '低'].includes(confidence)) throw new Error('联网核实未提供可靠性等级');
+            resolve({
+              answers, confidence,
+              explanation: clean(parsed.explanation).slice(0, 1100),
+              sources: evidence.sources, searched: true, model: 'deepseek-flash'
+            });
+          } catch (error) { reject(error); }
+        },
+        onerror: () => reject(new Error('DeepSeek 联网请求失败，请检查网络/跨域权限')),
+        ontimeout: () => reject(new Error('DeepSeek 联网核实超时；本题暂不自动提交'))
+      });
+    });
+  }
+
   // Vue / Ant Design Vue 的 checkbox-group 通过 v-model 更新 selectedValues。
   // 若在同一轮事件循环内对多个选项连续 click，后一次可能使用旧的 group value
   // 覆盖前一次，表现为多选只勾住最后一个。必须每点击一次都等待 Vue 完成更新。
@@ -764,6 +896,34 @@
         log('AI 无法确定或自评可靠性低：不自动勾选/提交，等待人工核对');
         setStatus('该题需人工核对'); return;
       }
+      if (prefs.webVerify !== false) {
+        setStatus('DeepSeek 正在联网检索并核实...');
+        log('联网核实：调用 DeepSeek 官方 deepseek_web_search（深度搜索）');
+        let online;
+        try {
+          online = await askWebVerify(q);
+        } catch (e) {
+          answer.webChecked = true;
+          answer.explanation += `\n【联网核实失败】${e.message || e}`;
+          showAnswer(q, answer);
+          log(`联网核实失败：${e.message || e}；不会自动提交`);
+          setStatus('联网核实失败，待人工核对'); return;
+        }
+        answer.webChecked = true;
+        answer.sources = online.sources;
+        log(`联网核实 ${online.model}：${online.answers.join('、') || '不确定'}；可靠性 ${online.confidence}；来源 ${online.sources.length} 个`);
+        for (const v of online.sources.slice(0, 3)) log(`检索来源：${v.url}`);
+        if (!online.answers.length || online.confidence === '低' || !sameLetters(answer.answers, online.answers)) {
+          answer.confidence = '低';
+          answer.explanation += `\n【联网核实存在分歧】联网建议：${online.answers.join('、') || '不确定'}；${online.explanation}`;
+          showAnswer(q, answer);
+          log('联网核实意见不一致、依据不足或可信度低：暂停自动提交');
+          setStatus('联网核实分歧，待人工核对'); return;
+        }
+        answer.webVerified = true;
+        showAnswer(q, answer);
+        log('联网检索已返回来源且答案与首轮一致');
+      }
       if (prefs.doubleCheck) {
         const hasImages = q.choices.some(o => o.imageUrl);
         const reviewModel = hasImages ? 'deepseek-flash' : (answer.model === 'deepseek-v4-pro' ? 'deepseek-flash' : 'deepseek-v4-pro');
@@ -851,7 +1011,7 @@
   });
 
   populatePanel();
-  log(`脚本 ${VERSION} 就绪：网页刷新后重新定位未完成课程；视频完成后可刷新进度`);
+  log(`脚本 ${VERSION} 就绪：已加入 DeepSeek 官方联网核实；视频完成后继续刷新定位`);
   if (document.getElementById('ucas-study-helper')) log('发现另一个实安课堂助手，请避免同时开启两个自动学习脚本');
   setStatus(running ? '全自动运行中' : '待机：填写 API Key 后保存并开始');
   attachVideo();
