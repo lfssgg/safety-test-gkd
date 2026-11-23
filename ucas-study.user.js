@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         UCAS 实安课堂 · 题库驱动全自动学习助手
 // @namespace    https://ucas.jcedutec.cn/
-// @version      2.0.1
-// @description  以题干和选项为主匹配 4304 道题库，题目 ID 仅作辅助；未命中时使用 DeepSeek；自动答题并续刷未完成课程。
+// @version      2.1.0
+// @description  双模式：刷题模式自动定位未完成课程并刷新续刷；查漏补缺模式手动选择课程、不刷新网页。题库优先，未命中时使用 DeepSeek。
 // @author       Zyoung&GPT
 // @homepageURL  https://github.com/lfssgg/safety-test-gkd
 // @supportURL   https://github.com/lfssgg/safety-test-gkd/issues
@@ -22,7 +22,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '2.0.1';
+  const VERSION = '2.1.0';
   const ID = 'ucas-deepseek-study-assistant-v1';
   const RUN_KEY = 'ucas-ds-study-running';
   const API = 'https://api.deepseek.com/chat/completions';
@@ -37,12 +37,14 @@
     apiKey: '', model: 'deepseek-v4-pro', speed: 1.5,
     reasoningEffort: 'high', doubleCheck: true, webVerify: true, reference: '',
     useQuestionBank: true,
+    mode: 'normal', // normal=刷题模式；catchup=查漏补缺模式
     autoNext: true, autoAI: true, autoApply: true, autoSubmit: true, autoStart: true,
     autoLocate: true, refreshAfterEnd: true
   };
   // 沿用 v1.4 的 API Key、倍速等配置；质量模式的升级迁移独立处理。
   const saved = GM_getValue('ucas-ds-options-v1', {}) || {};
   let prefs = { ...defaults, ...saved };
+  if (!['normal', 'catchup'].includes(prefs.mode)) prefs.mode = 'normal';
   if (!GM_getValue('ucas-ds-migrated-v12', false)) {
     prefs.autoAI = true;
     prefs.autoApply = true;
@@ -60,14 +62,16 @@
     GM_setValue('ucas-ds-migrated-v15', true);
   }
   function savePreferencesEarly() { GM_setValue('ucas-ds-options-v1', prefs); }
-  let running = sessionStorage.getItem(RUN_KEY) === '1' || (prefs.autoStart && (Boolean(prefs.apiKey) || prefs.useQuestionBank !== false));
+  // 查漏补缺必须由用户手动选择课程并启动，不能继承上一次任务状态而误播默认课程。
+  if (prefs.mode === 'catchup') sessionStorage.removeItem(RUN_KEY);
+  let running = prefs.mode !== 'catchup' && (sessionStorage.getItem(RUN_KEY) === '1' || (prefs.autoStart && (Boolean(prefs.apiKey) || prefs.useQuestionBank !== false)));
   let boundVideo = null;
   let boundSrc = null;
   const seenVideos = new WeakSet();
   let pendingNext = false;
   let navigating = false;
   let reloading = false;
-  let locating = Boolean(running && prefs.autoLocate && /\/students\/courseDetail/i.test(location.pathname));
+  let locating = Boolean(running && prefs.mode !== 'catchup' && prefs.autoLocate && /\/students\/courseDetail/i.test(location.pathname));
   let locateTask = null;
   let thinking = false;
   const retryAfter = new Map();
@@ -133,6 +137,13 @@
         <p id="course" class="muted">等待检测课程...</p>
         <p id="progress" class="muted"></p>
         <p id="bankStatus" class="muted">题库：正在初始化...</p>
+        <label>运行模式
+          <select id="mode">
+            <option value="normal">刷题模式（自动定位未完成课程，结束后刷新）</option>
+            <option value="catchup">查漏补缺模式（手动选择课程，结束不刷新）</option>
+          </select>
+        </label>
+        <p id="modeHint" class="muted"></p>
         <p id="answer"></p>
         <div class="buttons">
           <button id="start">开始全自动学习</button><button id="stop">暂停</button>
@@ -155,13 +166,13 @@
              <option value="1">1 倍</option><option value="1.25">1.25 倍</option>
              <option value="1.5">1.5 倍</option><option value="1.75">1.75 倍</option><option value="2">2 倍</option>
           </select></label>
-          <label><input id="autoNext" type="checkbox">课程播放完毕后继续下一节未完成课程</label>
-          <label><input id="autoLocate" type="checkbox">进入或刷新网页时，自动定位首个未完成视频</label>
-          <label><input id="refreshAfterEnd" type="checkbox">视频正常结束后刷新网页，读取平台最新进度</label>
+          <label><input id="autoNext" type="checkbox">课程播放完毕后自动继续下一节（查漏补缺时按目录顺序）</label>
+          <label><input id="autoLocate" type="checkbox" disabled>自动定位首个未完成视频（由运行模式控制）</label>
+          <label><input id="refreshAfterEnd" type="checkbox" disabled>视频结束后刷新网页（由运行模式控制）</label>
           <label><input id="autoAI" type="checkbox">检测到习题时自动调用 DeepSeek</label>
           <label><input id="autoApply" type="checkbox">自动逐项勾选 AI 建议的选项（多选题逐项校验，不覆盖已有选择）</label>
           <label><input id="autoSubmit" type="checkbox">自动提交视频习题（默认开启）</label>
-          <label><input id="autoStart" type="checkbox">网页刷新后自动恢复任务（已配置 API Key 时）</label>
+          <label><input id="autoStart" type="checkbox">网页刷新后自动恢复任务（仅刷题模式）</label>
           <p class="muted">文字题默认 Pro+深度思考，图片题自动使用 Flash。联网核实使用同一个 DeepSeek Key 和官方 deepseek_web_search 工具；启用联网核实+独立复核时最多会发起三轮模型请求。没有实际搜索来源、答案分歧或置信度低时不自动提交。联网结果可能不准确，课程资料会发送给 DeepSeek，请勿填写隐私或密钥。</p>
           <button id="save">保存设置</button><button id="export">导出日志</button>
         </details>
@@ -190,6 +201,10 @@
     prefs.webVerify = $('webVerify').checked;
     prefs.reference = $('reference').value.slice(0, 4500);
     prefs.useQuestionBank = $('useQuestionBank').checked;
+    prefs.mode = $('mode').value === 'catchup' ? 'catchup' : 'normal';
+    // 两种模式对定位和刷新采用固定策略，避免勾选项与模式行为互相冲突。
+    prefs.autoLocate = prefs.mode === 'normal';
+    prefs.refreshAfterEnd = prefs.mode === 'normal';
     if (prefs.useQuestionBank && !questionBankIndex) {
       restoreQuestionBankCache();
       refreshQuestionBank(false);
@@ -199,11 +214,26 @@
     prefs.autoAI = $('autoAI').checked;
     prefs.autoApply = $('autoApply').checked;
     prefs.autoSubmit = $('autoSubmit').checked;
-    prefs.autoStart = $('autoStart').checked;
-    prefs.autoLocate = $('autoLocate').checked;
-    prefs.refreshAfterEnd = $('refreshAfterEnd').checked;
+    prefs.autoStart = prefs.mode === 'normal' && $('autoStart').checked;
+    applyModeUI();
     save();
     if (boundVideo) boundVideo.playbackRate = prefs.speed;
+  }
+  function applyModeUI() {
+    const catchup = $('mode').value === 'catchup';
+    prefs.mode = catchup ? 'catchup' : 'normal';
+    prefs.autoLocate = !catchup;
+    prefs.refreshAfterEnd = !catchup;
+    $('autoLocate').checked = !catchup;
+    $('autoLocate').disabled = true;
+    $('refreshAfterEnd').checked = !catchup;
+    $('refreshAfterEnd').disabled = true;
+    $('autoStart').checked = !catchup && Boolean(prefs.autoStart);
+    $('autoStart').disabled = catchup;
+    $('start').textContent = catchup ? '开始查漏补缺' : '开始全自动学习';
+    $('modeHint').textContent = catchup
+      ? '先在左侧目录手动点击要补刷的视频（已完成课程也可以），再点击「开始查漏补缺」。本模式不自动定位、不刷新网页；是否自动进入下一节由下方开关控制。'
+      : '自动定位首个未完成视频；每节视频结束后刷新网页，重新读取平台进度并继续下一节。';
   }
   function populatePanel() {
     $('apiKey').value = prefs.apiKey;
@@ -213,8 +243,10 @@
     $('webVerify').checked = prefs.webVerify !== false;
     $('reference').value = prefs.reference || '';
     $('useQuestionBank').checked = prefs.useQuestionBank !== false;
+    $('mode').value = prefs.mode === 'catchup' ? 'catchup' : 'normal';
     $('speed').value = String(prefs.speed);
-    for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit', 'autoStart', 'autoLocate', 'refreshAfterEnd']) $(key).checked = prefs[key];
+    for (const key of ['autoNext', 'autoAI', 'autoApply', 'autoSubmit']) $(key).checked = prefs[key];
+    applyModeUI();
   }
 
   function normalizeMatchText(value) {
@@ -712,7 +744,12 @@
         const found = await firstUnfinishedLesson(tree);
         if (found.canceled) return false;
         if (!found.leaf) {
-          log(found.inspected ? `已检查 ${found.inspected} 节：未发现未完成课程` : '目录中没有可识别的进度标记，请核对页面是否加载完毕');
+          log(found.inspected ? `已检查 ${found.inspected} 节：未发现未完成课程，停止自动播放` : '目录中没有可识别的进度标记，停止自动播放以避免误播默认课程');
+          // 全部完成或进度标记无法识别时，必须停止运行；否则定时器可能误启动页面默认视频。
+          running = false;
+          pendingNext = false;
+          sessionStorage.removeItem(RUN_KEY);
+          boundVideo?.pause();
           setStatus(found.inspected ? '未发现未完成课程' : '无法识别进度标记');
           return false;
         }
@@ -735,7 +772,7 @@
     return locateTask;
   }
   function refreshForNextLesson() {
-    if (!running || reloading || !isCourseDetail()) return false;
+    if (prefs.mode === 'catchup' || !running || reloading || !isCourseDetail()) return false;
     if (activeVideoQuiz()) return false;
     reloading = true;
     pendingNext = false;
@@ -752,14 +789,14 @@
     const selected = tree?.querySelector('li.ant-tree-treenode-selected');
     if (!tree || !selected) return null;
 
-    // 优先处理本章节中当前视频后面的未学完小节。
+    // 优先处理本章节当前视频后面的课程；查漏补缺模式允许继续进入已完成课程。
     const siblings = directChildren(selected.parentElement);
     for (const li of siblings.slice(siblings.indexOf(selected) + 1)) {
       const found = treeLeaf(li);
       if (found) return found;
     }
 
-    // 本章节完成后，按树目录原有顺序展开后续大章节，寻找未学完小节。
+    // 本章节后续课程处理完后，按树目录原有顺序展开后续大章节。
     const roots = directChildren(tree);
     const root = parentGroup(selected, tree);
     const index = roots.indexOf(root);
@@ -794,7 +831,7 @@
     try {
       const next = await resolveNextLesson();
       if (!next) {
-        log('未找到后续未学完的课程；如课程列表没有加载完整，请自行展开查看');
+        log('未找到后续课程；如课程列表没有加载完整，请自行展开查看');
         pendingNext = false;
         return false;
       }
@@ -826,7 +863,7 @@
       log('检测到视频习题，等待自动答题成功后再切课');
       return;
     }
-    if (prefs.refreshAfterEnd && isCourseDetail()) refreshForNextLesson();
+    if (prefs.mode === 'normal' && prefs.refreshAfterEnd && isCourseDetail()) refreshForNextLesson();
     else goNext(false);
   }
 
@@ -1337,17 +1374,34 @@
   }
   function start() {
     readPanel();
+    if (prefs.mode === 'catchup') {
+      const selected = selectedLesson();
+      const selectedLeaf = selected ? treeLeaf(selected) : null;
+      if (!isCourseDetail() || !selectedLeaf) {
+        setStatus('请先选择要补刷的视频');
+        log('查漏补缺模式尚未启动：请先在左侧课程目录手动选择一个视频课程（已完成课程也可以）');
+        return;
+      }
+    }
     running = true;
-    prefs.autoStart = true;
-    $('autoStart').checked = true;
+    prefs.autoStart = prefs.mode === 'normal';
+    $('autoStart').checked = prefs.autoStart;
+    applyModeUI();
     save();
     sessionStorage.setItem(RUN_KEY, '1');
-    setStatus('运行中');
-    locating = Boolean(prefs.autoLocate && isCourseDetail());
+    setStatus(prefs.mode === 'catchup' ? '查漏补缺运行中' : '运行中');
+    locating = Boolean(prefs.mode === 'normal' && prefs.autoLocate && isCourseDetail());
     attachVideo();
-    if (locating) beginLocate('手动启动');
-    else playVideo();
-    log('开始学习：先定位未完成课程，再按正常播放进度运行');
+    if (locating) {
+      beginLocate('手动启动');
+      log('刷题模式启动：先定位首个未完成课程，再按正常播放进度运行');
+    } else {
+      playVideo();
+      if (prefs.mode === 'catchup') {
+        const selectedTitle = clean(selectedLesson()?.querySelector(':scope > .ant-tree-node-content-wrapper .ant-tree-title')?.textContent) || courseTitle();
+        log(`查漏补缺模式启动：从手动选择的课程开始（${selectedTitle}）；视频结束后不刷新网页`);
+      }
+    }
     if (prefs.autoAI) solveOne();
   }
   function stop() {
@@ -1364,6 +1418,31 @@
   }
   $('start').addEventListener('click', start);
   $('stop').addEventListener('click', stop);
+  $('mode').addEventListener('change', () => {
+    if (running) stop();
+    else {
+      pendingNext = false;
+      locating = false;
+      sessionStorage.removeItem(RUN_KEY);
+      boundVideo?.pause();
+    }
+    prefs.mode = $('mode').value === 'catchup' ? 'catchup' : 'normal';
+    if (prefs.mode === 'catchup') {
+      prefs.autoLocate = false;
+      prefs.refreshAfterEnd = false;
+      prefs.autoStart = false;
+      sessionStorage.removeItem(RUN_KEY);
+    } else {
+      prefs.autoLocate = true;
+      prefs.refreshAfterEnd = true;
+    }
+    applyModeUI();
+    save();
+    setStatus(prefs.mode === 'catchup' ? '查漏补缺待机：请先选择课程' : '刷题模式待机');
+    log(prefs.mode === 'catchup'
+      ? '已切换到查漏补缺模式：请手动选择课程；不自动定位、不刷新网页'
+      : '已切换到刷题模式：自动定位首个未完成课程；视频结束后刷新读取进度');
+  });
   $('solve').addEventListener('click', () => { readPanel(); solveOne(true); });
   $('refreshBank').addEventListener('click', async () => {
     readPanel();
@@ -1407,12 +1486,12 @@
   }
   log(`脚本 ${VERSION} 就绪：题干优先 + 选项核对，题目 ID 仅作辅助；未命中时回退 DeepSeek`);
   if (document.getElementById('ucas-study-helper')) log('发现另一个实安课堂助手，请避免同时开启两个自动学习脚本');
-  setStatus(running ? '全自动运行中' : '待机：可用题库自动答题；未命中题目需配置 API Key');
+  setStatus(running ? '全自动运行中' : (prefs.mode === 'catchup' ? '查漏补缺待机：请先选择课程' : '待机：可用题库自动答题；未命中题目需配置 API Key'));
   attachVideo();
   updateProgress();
   if (running) {
     sessionStorage.setItem(RUN_KEY, '1');
-    log('已自动恢复学习流程，先读取最新课程完成状态');
+    log('已自动恢复刷题流程，先读取最新课程完成状态');
     if (locating) beginLocate('刷新/首次进入');
     else playVideo();
     if (prefs.autoAI) solveOne(false);
